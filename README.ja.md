@@ -18,14 +18,14 @@ $ netblame https://example.com
 
 ### バイナリ (推奨)
 
-[Releases](https://github.com/nkchan/netblame/releases) から Linux / macOS のバイナリをダウンロードして PATH に置いてください。
+[Releases](https://github.com/pathvector-studio/netblame/releases) から Linux / macOS のバイナリをダウンロードして PATH に置いてください。
 
 ### ソースから
 
 Rust ツールチェーン (1.85+) があればビルドできます。
 
 ```bash
-git clone https://github.com/nkchan/netblame.git
+git clone https://github.com/pathvector-studio/netblame.git
 cd netblame
 cargo build --release
 # バイナリは target/release/netblame

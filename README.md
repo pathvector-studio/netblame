@@ -19,14 +19,14 @@ $ netblame https://example.com
 
 ### Binary (recommended)
 
-Download a Linux/macOS binary from [Releases](https://github.com/nkchan/netblame/releases) and put it on your PATH.
+Download a Linux/macOS binary from [Releases](https://github.com/pathvector-studio/netblame/releases) and put it on your PATH.
 
 ### From source
 
 Requires Rust 1.85+.
 
 ```bash
-git clone https://github.com/nkchan/netblame.git
+git clone https://github.com/pathvector-studio/netblame.git
 cd netblame
 cargo build --release
 # binary at target/release/netblame

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence."
 license = "MIT"
-repository = "https://github.com/nkchan/netblame"
+repository = "https://github.com/pathvector-studio/netblame"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
