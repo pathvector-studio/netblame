@@ -1,4 +1,4 @@
-//! blame — 「それ、本当にネットワークのせい?」
+//! netblame — 「それ、本当にネットワークのせい?」
 //! URL/ホストに対して段階診断 (環境→DNS→TCP→TLS→HTTP→経路品質) を行い、
 //! 最も可能性の高い犯人を平易な日本語で名指しする。
 
@@ -16,7 +16,7 @@ use verdict::{judge, Culprit};
 
 /// それ、本当にネットワークのせい? — 段階診断で犯人を名指しする CLI
 #[derive(Parser, Debug)]
-#[command(name = "blame", version, about, arg_required_else_help = true)]
+#[command(name = "netblame", version, about, arg_required_else_help = true)]
 struct Args {
     /// 診断対象: URL (https://example.com/path) または host[:port]
     target: String,
@@ -75,7 +75,10 @@ fn parse_target(raw: &str) -> Result<Target, String> {
         let host = rest6[..end].to_string();
         let after = &rest6[end + 1..];
         let port = if let Some(p) = after.strip_prefix(':') {
-            Some(p.parse::<u16>().map_err(|_| format!("ポート番号が不正です: {p}"))?)
+            Some(
+                p.parse::<u16>()
+                    .map_err(|_| format!("ポート番号が不正です: {p}"))?,
+            )
         } else {
             None
         };
@@ -87,7 +90,10 @@ fn parse_target(raw: &str) -> Result<Target, String> {
         } else {
             (
                 h.to_string(),
-                Some(p.parse::<u16>().map_err(|_| format!("ポート番号が不正です: {p}"))?),
+                Some(
+                    p.parse::<u16>()
+                        .map_err(|_| format!("ポート番号が不正です: {p}"))?,
+                ),
             )
         }
     } else {
@@ -135,7 +141,11 @@ impl Printer {
     }
     fn warn(&self, msg: &str) {
         if !self.quiet {
-            println!("  {} {}", "⚠".if_supports_color(Stdout, |t| t.yellow()), msg);
+            println!(
+                "  {} {}",
+                "⚠".if_supports_color(Stdout, |t| t.yellow()),
+                msg
+            );
         }
     }
     fn fail(&self, msg: &str) {
@@ -177,7 +187,7 @@ async fn main() {
     if !args.json {
         println!(
             "{} {} (port {}) を診断します…",
-            "blame:".if_supports_color(Stdout, |t| t.bold()),
+            "netblame:".if_supports_color(Stdout, |t| t.bold()),
             target.host.if_supports_color(Stdout, |t| t.cyan()),
             target.port
         );
@@ -239,7 +249,9 @@ async fn main() {
                         .collect::<Vec<_>>()
                         .join(", ")
                 )),
-                DnsOutcome::NxDomain => p.fail(&format!("{}: NXDOMAIN (名前が存在しない)", src.label)),
+                DnsOutcome::NxDomain => {
+                    p.fail(&format!("{}: NXDOMAIN (名前が存在しない)", src.label))
+                }
                 DnsOutcome::ServFail => p.fail(&format!("{}: SERVFAIL", src.label)),
                 DnsOutcome::Timeout => p.fail(&format!("{}: タイムアウト", src.label)),
                 DnsOutcome::Error(e) => p.fail(&format!("{}: {}", src.label, e)),
@@ -335,7 +347,9 @@ async fn main() {
                     ));
                     if let Some(issuer) = &r.presented_issuer {
                         if r.interception_suspected {
-                            p.warn(&format!("提示された発行者: {issuer} (ミドルボックスの疑い)"));
+                            p.warn(&format!(
+                                "提示された発行者: {issuer} (ミドルボックスの疑い)"
+                            ));
                         } else {
                             p.warn(&format!("提示された発行者: {issuer}"));
                         }
@@ -485,7 +499,9 @@ async fn main() {
         };
         let headline = format!(
             "{}",
-            verdict.headline.if_supports_color(Stdout, |t| t.style(style))
+            verdict
+                .headline
+                .if_supports_color(Stdout, |t| t.style(style))
         );
         println!(
             "{} {}",
@@ -509,7 +525,11 @@ async fn main() {
         );
     }
 
-    std::process::exit(if verdict.culprit == Culprit::NoProblem { 0 } else { 1 });
+    std::process::exit(if verdict.culprit == Culprit::NoProblem {
+        0
+    } else {
+        1
+    });
 }
 
 #[cfg(test)]

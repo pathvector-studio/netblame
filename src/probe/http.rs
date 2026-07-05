@@ -16,7 +16,7 @@ pub async fn run(url: &str, timeout: Duration) -> HttpReport {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(timeout)
         .timeout(timeout * 2)
-        .user_agent(concat!("blame/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("netblame/", env!("CARGO_PKG_VERSION")))
         .build()
     {
         Ok(c) => c,

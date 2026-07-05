@@ -117,8 +117,8 @@ impl DnsView {
             .iter()
             .filter(|s| !matches!(s.outcome, DnsOutcome::Timeout | DnsOutcome::Error(_)))
             .collect();
-        let all_nxdomain = !answered.is_empty()
-            && answered.iter().all(|s| s.outcome == DnsOutcome::NxDomain);
+        let all_nxdomain =
+            !answered.is_empty() && answered.iter().all(|s| s.outcome == DnsOutcome::NxDomain);
 
         let mut local_ips: Vec<String> = srcs
             .iter()
@@ -197,7 +197,9 @@ impl TcpView {
         let best_connect_ms = probes
             .iter()
             .filter_map(|p| p.avg_ms)
-            .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.min(v)))
+            });
         Self {
             ran,
             any_ok,
@@ -504,7 +506,10 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
 }
 
 fn tls_failed(report: &Report) -> bool {
-    report.tls.as_ref().is_some_and(|t| !t.verified && t.error.is_some())
+    report
+        .tls
+        .as_ref()
+        .is_some_and(|t| !t.verified && t.error.is_some())
 }
 
 /// 主判定に含まれない副次的所見を集める
@@ -555,10 +560,18 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(93, 184, 216, last))
     }
     fn ip6() -> IpAddr {
-        IpAddr::V6(Ipv6Addr::new(0x2606, 0x2800, 0x220, 1, 0x248, 0x1893, 0x25c8, 0x1946))
+        IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x2800, 0x220, 1, 0x248, 0x1893, 0x25c8, 0x1946,
+        ))
     }
 
-    fn dns_src(source: DnsSource, label: &str, outcome: DnsOutcome, ips: Vec<IpAddr>, ms: f64) -> DnsSourceResult {
+    fn dns_src(
+        source: DnsSource,
+        label: &str,
+        outcome: DnsOutcome,
+        ips: Vec<IpAddr>,
+        ms: f64,
+    ) -> DnsSourceResult {
         DnsSourceResult {
             source,
             label: label.into(),
@@ -572,7 +585,13 @@ mod tests {
         DnsReport {
             skipped: false,
             sources: vec![
-                dns_src(DnsSource::System, "システム", DnsOutcome::Ok, vec![ip4(34)], 12.0),
+                dns_src(
+                    DnsSource::System,
+                    "システム",
+                    DnsOutcome::Ok,
+                    vec![ip4(34)],
+                    12.0,
+                ),
                 dns_src(
                     DnsSource::Local("192.168.1.1".parse().unwrap()),
                     "ローカル 192.168.1.1",

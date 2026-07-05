@@ -3,9 +3,7 @@
 //! で解決し、回答・結果コード・レイテンシを比較する。
 
 use crate::report::{DnsOutcome, DnsReport, DnsSource, DnsSourceResult};
-use hickory_resolver::config::{
-    LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig,
-};
+use hickory_resolver::config::{LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::op::ResponseCode;
@@ -22,14 +20,22 @@ async fn query_system(host: &str, timeout: Duration) -> DnsSourceResult {
     let start = Instant::now();
     let joined = tokio::time::timeout(
         timeout,
-        tokio::task::spawn_blocking(move || (host_owned.as_str(), 0u16).to_socket_addrs().map(|it| it.map(|sa| sa.ip()).collect::<Vec<_>>())),
+        tokio::task::spawn_blocking(move || {
+            (host_owned.as_str(), 0u16)
+                .to_socket_addrs()
+                .map(|it| it.map(|sa| sa.ip()).collect::<Vec<_>>())
+        }),
     )
     .await;
     let latency = start.elapsed().as_secs_f64() * 1000.0;
 
     let (outcome, ips, latency_ms) = match joined {
         Err(_) => (DnsOutcome::Timeout, Vec::new(), None),
-        Ok(Err(e)) => (DnsOutcome::Error(format!("join error: {e}")), Vec::new(), None),
+        Ok(Err(e)) => (
+            DnsOutcome::Error(format!("join error: {e}")),
+            Vec::new(),
+            None,
+        ),
         Ok(Ok(Err(e))) => {
             // getaddrinfo は NXDOMAIN と SERVFAIL を区別しにくいが、
             // メッセージから推測する
@@ -61,8 +67,15 @@ async fn query_system(host: &str, timeout: Duration) -> DnsSourceResult {
 }
 
 /// 特定のネームサーバへ直接問い合わせる
-async fn query_direct(host: &str, ns: IpAddr, source: DnsSource, label: String, timeout: Duration) -> DnsSourceResult {
-    let mut config = ResolverConfig::from_parts(None, Vec::new(), vec![NameServerConfig::udp_and_tcp(ns)]);
+async fn query_direct(
+    host: &str,
+    ns: IpAddr,
+    source: DnsSource,
+    label: String,
+    timeout: Duration,
+) -> DnsSourceResult {
+    let mut config =
+        ResolverConfig::from_parts(None, Vec::new(), vec![NameServerConfig::udp_and_tcp(ns)]);
     // from_parts で足りるが、明示のためこのまま
     let _ = &mut config;
 
@@ -98,7 +111,11 @@ async fn query_direct(host: &str, ns: IpAddr, source: DnsSource, label: String, 
 
     let start = Instant::now();
     // hickory 自体のタイムアウトに加えて全体の保険をかける
-    let result = tokio::time::timeout(timeout + Duration::from_millis(500), resolver.lookup_ip(fqdn.as_str())).await;
+    let result = tokio::time::timeout(
+        timeout + Duration::from_millis(500),
+        resolver.lookup_ip(fqdn.as_str()),
+    )
+    .await;
     let latency = start.elapsed().as_secs_f64() * 1000.0;
 
     let (outcome, ips, latency_ms) = match result {
@@ -172,10 +189,12 @@ pub async fn run(host: &str, local_nameservers: &[IpAddr], timeout: Duration) ->
     }
 
     // (c) 1.1.1.1, (d) 8.8.8.8
-    for (ns, name) in [(CLOUDFLARE, "1.1.1.1 (Cloudflare)"), (GOOGLE, "8.8.8.8 (Google)")] {
-        sources.push(
-            query_direct(host, ns, DnsSource::Public(ns), name.to_string(), timeout).await,
-        );
+    for (ns, name) in [
+        (CLOUDFLARE, "1.1.1.1 (Cloudflare)"),
+        (GOOGLE, "8.8.8.8 (Google)"),
+    ] {
+        sources
+            .push(query_direct(host, ns, DnsSource::Public(ns), name.to_string(), timeout).await);
     }
 
     DnsReport {

@@ -1,9 +1,10 @@
 [package]
-name = "blame"
+name = "netblame"
 version = "0.1.0"
 edition = "2021"
-description = "それ、本当にネットワークのせい? — 段階診断で犯人を名指しするCLI"
+description = "Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence."
 license = "MIT"
+repository = "https://github.com/nkchan/netblame"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }

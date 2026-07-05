@@ -50,7 +50,14 @@ pub fn find_hosts_override(content: &str, host: &str) -> Option<String> {
 /// プロキシ環境変数を検出する
 pub fn detect_proxies() -> (Vec<(String, String)>, Option<String>) {
     let mut proxies = Vec::new();
-    for key in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"] {
+    for key in [
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
         if let Ok(v) = std::env::var(key) {
             if !v.is_empty() {
                 proxies.push((key.to_string(), v));

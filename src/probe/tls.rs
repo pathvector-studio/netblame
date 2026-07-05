@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use x509_parser::prelude::FromDer;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
 /// TLS 傍受装置 (ミドルボックス) によく現れる発行者名のキーワード
 const MIDDLEBOX_KEYWORDS: &[&str] = &[
