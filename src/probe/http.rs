@@ -2,12 +2,23 @@
 //! reqwest (rustls バックエンド) で GET を発行し、ステータス・リダイレクト
 //! チェーン (最大5ホップ)・TTFB・合計時間を計測する。
 //! DNS / TCP / TLS の内訳時間は各ステージの実測値を main 側で埋める。
+//! 最終応答の alt-svc ヘッダも記録し、HTTP/3 (h3) が広告されているか調べる
+//! (v0.4: QUIC プローブ判定の材料になる)。
 
 use crate::i18n::{self, Lang};
 use crate::report::HttpReport;
 use std::time::{Duration, Instant};
 
 const MAX_REDIRECTS: usize = 5;
+
+/// alt-svc ヘッダの値に h3 (h3, h3-29 等の draft 版含む) が含まれるか判定する。
+/// 例: `h3=":443"; ma=86400, h3-29=":443"; ma=86400`
+pub fn parses_h3(alt_svc: &str) -> bool {
+    alt_svc
+        .split(',')
+        .map(str::trim)
+        .any(|entry| entry.starts_with("h3=") || entry.starts_with("h3-"))
+}
 
 /// HTTP ステージを実行する
 pub async fn run(url: &str, timeout: Duration, lang: Lang) -> HttpReport {
@@ -84,6 +95,14 @@ pub async fn run(url: &str, timeout: Duration, lang: Lang) -> HttpReport {
         // 最終ホップ: ボディを読み切って合計時間を出す
         report.status = Some(status.as_u16());
         report.ttfb_ms = Some(ttfb);
+        if let Some(alt_svc) = resp
+            .headers()
+            .get(reqwest::header::ALT_SVC)
+            .and_then(|v| v.to_str().ok())
+        {
+            report.h3_advertised = parses_h3(alt_svc);
+            report.alt_svc = Some(alt_svc.to_string());
+        }
         match resp.bytes().await {
             Ok(_) => {}
             Err(e) => {
@@ -95,4 +114,22 @@ pub async fn run(url: &str, timeout: Duration, lang: Lang) -> HttpReport {
     }
 
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_h3_from_alt_svc() {
+        assert!(parses_h3(r#"h3=":443"; ma=86400"#));
+        assert!(parses_h3(r#"h3-29=":443"; ma=86400"#));
+        assert!(parses_h3(r#"h2=":443"; ma=2592000, h3=":443"; ma=2592000"#));
+    }
+
+    #[test]
+    fn no_h3_in_alt_svc() {
+        assert!(!parses_h3(r#"h2=":443"; ma=2592000"#));
+        assert!(!parses_h3(""));
+    }
 }

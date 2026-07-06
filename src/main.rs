@@ -426,6 +426,48 @@ async fn diagnose(
         None
     };
 
+    // ── ステージ: QUIC/HTTP3 (https ターゲットのみ、HTTP ステージの後) ──
+    let quic_report = match primary_ip {
+        Some(ip) if target.use_tls && target.do_http && tcp_any_ok => {
+            p.section(MsgKey::StageQuic);
+            let r = probe::quic::run(&target.host, ip, target.port, timeout).await;
+            let h3_advertised = http_report.as_ref().is_some_and(|h| h.h3_advertised);
+            match &r.outcome {
+                report::QuicOutcome::Ok {
+                    handshake_ms,
+                    negotiated_alpn,
+                } => {
+                    p.ok(&i18n::quic_handshake_ok_line(
+                        lang,
+                        &fmt_ms(Some(*handshake_ms)),
+                        negotiated_alpn.as_deref().unwrap_or("?"),
+                    ));
+                }
+                report::QuicOutcome::Timeout => {
+                    p.fail(&i18n::quic_timeout_line(lang, target.port));
+                }
+                report::QuicOutcome::HandshakeError(e) => {
+                    p.warn(&i18n::quic_handshake_error_line(lang, e));
+                }
+                report::QuicOutcome::LocalError(e) => {
+                    p.warn(&i18n::quic_local_error_line(lang, e));
+                }
+            }
+            if let Some(http) = &http_report {
+                match &http.alt_svc {
+                    Some(alt_svc) if h3_advertised => {
+                        p.ok(&i18n::h3_advertised_line(lang, alt_svc));
+                    }
+                    _ => {
+                        p.warn(&i18n::h3_not_advertised_line(lang));
+                    }
+                }
+            }
+            Some(r)
+        }
+        _ => None,
+    };
+
     // ── ステージ6: 経路品質 ─────────────────────────
     let path_report = match primary_ip {
         Some(ip) if tcp_any_ok => {
@@ -488,6 +530,7 @@ async fn diagnose(
         tcp: tcp_report,
         tls: tls_report,
         http: http_report,
+        quic: quic_report,
         path: path_report,
         trace: trace_report,
     };

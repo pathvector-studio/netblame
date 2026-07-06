@@ -1,6 +1,6 @@
 [package]
 name = "netblame"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence."
 license = "MIT"
@@ -17,6 +17,7 @@ webpki-roots = "1.0"
 rustls-pki-types = "1"
 x509-parser = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "system-proxy"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 owo-colors = { version = "4", features = ["supports-colors"] }

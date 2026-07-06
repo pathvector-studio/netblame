@@ -56,6 +56,8 @@ netblame <target> [flags]
 
 **Path trace auto-trigger**: without `--trace`, the hop-level trace stage runs automatically only when an earlier stage found a path problem (a TCP target timed out, packet loss > 0%, or high jitter). It adds up to ~15-30 s in the worst case, so it is skipped when everything is healthy. The trace uses tracepath-style probing (UDP + `IP_RECVERR`, **no root required**) and is **Linux-only** — on other platforms a note is printed and the stage is skipped.
 
+**QUIC/HTTP3 probe**: the QUIC probe stage runs automatically (no flag needed) for `https` targets only, right after the HTTP stage. It is cross-platform (Linux and macOS).
+
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error
 
 ## How it works
@@ -68,15 +70,16 @@ Measurement and judgment are strictly separated: each stage only appends facts t
 2. **DNS** (`dns.rs`) — resolves the name 4 ways and compares: (a) system resolver (getaddrinfo), (b) direct queries to each resolv.conf nameserver (hickory-resolver), (c) 1.1.1.1, (d) 8.8.8.8. Records answers, outcome (OK/NXDOMAIN/SERVFAIL/timeout) and latency per source
 3. **TCP** (`tcp.rs`) — connects N times to up to 3 resolved IPs (including both IPv4/IPv6 when present), measuring success rate and min/avg/max; distinguishes refused (port closed) from timeout (filtered)
 4. **TLS** (`tls.rs`) — verified handshake via rustls + webpki-roots; records TLS version, days until certificate expiry, hostname match. On verification failure it reconnects **without verification (read-only, diagnostic only)** to extract the presented issuer, and flags middlebox fingerprints (Zscaler, FortiGate, …) as probable TLS interception
-5. **HTTP** (`http.rs`) — GET via reqwest (rustls backend); status, redirect chain (max 5), TTFB and total time
-6. **Path quality** (`path.rs`) — N TCP connect-pings to the primary IP; computes loss %, average RTT and jitter (stddev)
-7. **Path trace** (`trace.rs`, Linux only, no root) — tracepath-style traceroute: an unprivileged UDP socket with `IP_RECVERR` receives ICMP time-exceeded / port-unreachable errors via `MSG_ERRQUEUE`, mapping each hop's router address and RTT (TTL 1-30, 2 probes/hop, 1 s timeout). Then DF-flagged datagrams of decreasing size (1500 → 1024) are sent with `IP_PMTUDISC_PROBE` to measure the path MTU and — crucially — whether oversized packets produce ICMP frag-needed replies or silently vanish (the PMTUD black hole signature)
+5. **HTTP** (`http.rs`) — GET via reqwest (rustls backend); status, redirect chain (max 5), TTFB and total time; also captures the `alt-svc` response header and records whether HTTP/3 (`h3`) is advertised
+6. **QUIC/HTTP3** (`quic.rs`) — runs after the HTTP stage, **only for `https` targets**: attempts a real QUIC handshake (ALPN `h3`, rustls + webpki-roots, same verification policy as the TLS stage) to the resolved IP and measures handshake time, distinguishing a clean success from a timeout (nothing comes back — the UDP-443-blocked signature), a handshake error (the server responded but negotiation failed — not a network problem), or a local error
+7. **Path quality** (`path.rs`) — N TCP connect-pings to the primary IP; computes loss %, average RTT and jitter (stddev)
+8. **Path trace** (`trace.rs`, Linux only, no root) — tracepath-style traceroute: an unprivileged UDP socket with `IP_RECVERR` receives ICMP time-exceeded / port-unreachable errors via `MSG_ERRQUEUE`, mapping each hop's router address and RTT (TTL 1-30, 2 probes/hop, 1 s timeout). Then DF-flagged datagrams of decreasing size (1500 → 1024) are sent with `IP_PMTUDISC_PROBE` to measure the path MTU and — crucially — whether oversized packets produce ICMP frag-needed replies or silently vanish (the PMTUD black hole signature)
 
 ### Verdict engine (`src/verdict.rs`)
 
 `fn judge(report: &Report) -> Verdict` is a **pure function with no I/O** (covered by unit tests) that picks exactly one culprit category from the evidence:
 
-`LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `ServerSlow` / `ServerDown` / `NoProblem`
+`LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `Udp443Blocked` / `ServerSlow` / `ServerDown` / `NoProblem`
 
 Selected reasoning rules (in priority order):
 
@@ -88,9 +91,10 @@ Selected reasoning rules (in priority order):
 - Fast connect (<100ms) but slow TTFB (>1000ms) → **the server is slow, the network is fine**
 - Loss ≥10% or jitter >50ms → unstable path
 - TCP connects fine, but path MTU < 1500 **and** oversized DF probes vanish without any ICMP frag-needed reply → **`PmtuBlackhole`** — small packets pass while large transfers stall, the classic VPN/tunnel failure. Next step: check the tunnel MTU / enable MSS clamping
+- TCP + TLS + HTTP all healthy, HTTP/3 was advertised via `alt-svc`, **and** every QUIC handshake attempt times out (no response at all) → **`Udp443Blocked`** — a firewall is most likely dropping UDP 443. This is intentionally the **lowest-priority** verdict: if anything bigger is wrong, that culprit wins and the QUIC finding is attached as a secondary note instead; if HTTP/3 isn't advertised in the first place, a QUIC timeout is expected and stays a secondary note, never a verdict
 - When the culprit is path-related (`TcpBlocked` / `ServerDown` / `UnstablePath`) and hop data exists, the evidence gains "last responding hop: <ip> (hop N of ~M)" and the next step gains a localization hint: dies at hop 1-2 → your home network (router/gateway); early hops → ISP; deep in the path → the far side
 
-Non-primary findings (hosts overrides, proxy presence, CDN answer differences, soon-to-expire certificates) are attached as secondary notes.
+Non-primary findings (hosts overrides, proxy presence, CDN answer differences, soon-to-expire certificates, non-blocking QUIC/HTTP3 anomalies) are attached as secondary notes.
 
 ## Development
 
@@ -118,7 +122,6 @@ runs: 42 / ok: 40 (95%)
 
 See [ROADMAP.md](ROADMAP.md).
 
-- **QUIC/HTTP3** — detect the "UDP 443 blocked, only HTTP/3 broken" class of failures
 - **Report-sharing service** — one command to upload a `--json` report and get a short URL you can hand to your IT desk or ISP support
 
 ## License

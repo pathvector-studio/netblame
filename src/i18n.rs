@@ -49,6 +49,7 @@ pub enum MsgKey {
     StageTcp,
     StageTls,
     StageHttp,
+    StageQuic,
     StagePath,
     StageTrace,
     TraceUnsupported,
@@ -85,6 +86,10 @@ pub fn msg(lang: Lang, key: MsgKey) -> &'static str {
         StageTcp => "TCP",
         StageTls => "TLS",
         StageHttp => "HTTP",
+        StageQuic => match lang {
+            En => "QUIC/HTTP3",
+            Ja => "QUIC/HTTP3",
+        },
         StagePath => match lang {
             En => "Path quality",
             Ja => "経路品質",
@@ -379,6 +384,50 @@ pub fn http_no_result_line(lang: Lang, url: &str) -> String {
     match lang {
         Lang::En => format!("GET {url}: no result"),
         Lang::Ja => format!("GET {url}: 結果なし"),
+    }
+}
+
+// ── QUIC/HTTP3 (v0.4) ───────────────────────────────────────────────────
+
+pub fn quic_handshake_ok_line(lang: Lang, ms: &str, alpn: &str) -> String {
+    match lang {
+        Lang::En => format!("QUIC handshake OK: {ms} ({alpn})"),
+        Lang::Ja => format!("QUIC ハンドシェイク成功: {ms} ({alpn})"),
+    }
+}
+
+pub fn quic_timeout_line(lang: Lang, port: u16) -> String {
+    match lang {
+        Lang::En => format!("no response on UDP {port} (timeout)"),
+        Lang::Ja => format!("UDP {port} 応答なし (タイムアウト)"),
+    }
+}
+
+pub fn quic_handshake_error_line(lang: Lang, error: &str) -> String {
+    match lang {
+        Lang::En => format!("QUIC handshake failed: {error}"),
+        Lang::Ja => format!("QUIC ハンドシェイク失敗: {error}"),
+    }
+}
+
+pub fn quic_local_error_line(lang: Lang, error: &str) -> String {
+    match lang {
+        Lang::En => format!("could not run the QUIC probe locally: {error}"),
+        Lang::Ja => format!("QUIC プローブをローカルで実行できませんでした: {error}"),
+    }
+}
+
+pub fn h3_not_advertised_line(lang: Lang) -> String {
+    match lang {
+        Lang::En => "HTTP/3 is not advertised (no alt-svc)".to_string(),
+        Lang::Ja => "HTTP/3 は広告されていません (alt-svc なし)".to_string(),
+    }
+}
+
+pub fn h3_advertised_line(lang: Lang, alt_svc: &str) -> String {
+    match lang {
+        Lang::En => format!("HTTP/3 advertised via alt-svc: {alt_svc}"),
+        Lang::Ja => format!("alt-svc で HTTP/3 が広告されています: {alt_svc}"),
     }
 }
 
@@ -679,6 +728,14 @@ pub fn headline(lang: Lang, h: &Headline) -> String {
                     .into()
             }
         },
+        Udp443Blocked => match lang {
+            Lang::En => {
+                "TCP works fine, but UDP 443 (QUIC/HTTP3) is completely unreachable".into()
+            }
+            Lang::Ja => {
+                "TCP は正常ですが、UDP 443 (QUIC/HTTP3) には全く到達できません".into()
+            }
+        },
         NoProblem => match lang {
             Lang::En => {
                 "No problem found. The path to this destination is healthy right now".into()
@@ -753,6 +810,10 @@ pub fn next_step(lang: Lang, h: &Headline) -> &'static str {
         PmtuBlackhole => match lang {
             Lang::En => "Check the MTU setting on your VPN/tunnel, and enable MSS clamping on the router. Lowering the interface MTU to the detected path MTU is a quick workaround",
             Lang::Ja => "VPN/トンネルの MTU 設定を確認し、ルータで MSS clamp (TCP MSS 調整) を有効化してください。インタフェースの MTU を検出値まで下げるのが応急処置になります",
+        },
+        Udp443Blocked => match lang {
+            Lang::En => "Browsers silently fall back to HTTP/2, so this is easy to miss — but it adds latency on the first connection and breaks services that require HTTP/3. Check your firewall rules for UDP 443",
+            Lang::Ja => "ブラウザは HTTP/2 にフォールバックするため気づきにくいが、初回接続の遅延や HTTP/3 前提のサービスで問題になります。FW ルールで UDP 443 を確認してください",
         },
         NoProblem => match lang {
             Lang::En => "If the problem is intermittent, run this again while the symptom is happening",
@@ -947,6 +1008,30 @@ pub fn evidence_line(lang: Lang, e: &Evidence) -> String {
                 "経路 MTU が {mtu} バイトだが、超過パケットへの ICMP 通知が返ってこない (PMTUD ブラックホール)"
             ),
         },
+        TcpTlsHttpHealthySoQuicIsolated => match lang {
+            Lang::En => {
+                "TCP 443 is healthy (TLS handshake and HTTP request both succeeded) — the problem is isolated to UDP 443"
+                    .into()
+            }
+            Lang::Ja => {
+                "TCP 443 は正常 (TLS ハンドシェイク・HTTP リクエストともに成功) — 問題は UDP 443 に限定されている"
+                    .into()
+            }
+        },
+        QuicAllTimedOut => match lang {
+            Lang::En => "every QUIC handshake attempt got no response at all".into(),
+            Lang::Ja => "QUIC ハンドシェイクの試行が全て無応答".into(),
+        },
+        Udp443LikelyFiltered => match lang {
+            Lang::En => {
+                "TCP 443 works fine, but every QUIC attempt over UDP 443 goes unanswered — a firewall is most likely dropping UDP 443"
+                    .into()
+            }
+            Lang::Ja => {
+                "TCP 443 は正常だが UDP 443 の QUIC が全て無応答 — ファイアウォールが UDP 443 を落としている可能性が高い"
+                    .into()
+            }
+        },
     }
 }
 
@@ -1006,6 +1091,28 @@ pub fn finding_line(lang: Lang, f: &Finding) -> String {
         CertExpiresSoon { days } => match lang {
             Lang::En => format!("the TLS certificate expires in only {days} days"),
             Lang::Ja => format!("TLS 証明書の残り有効期間が {days} 日と短い"),
+        },
+        QuicBrokenSecondary { h3_advertised } => match (lang, h3_advertised) {
+            (Lang::En, true) => {
+                "HTTP/3 is advertised (alt-svc) but the QUIC handshake did not succeed — likely UDP 443 is blocked, secondary to the bigger issue above".into()
+            }
+            (Lang::En, false) => {
+                "the QUIC handshake did not succeed (HTTP/3 is not advertised on this response, so this may not matter)".into()
+            }
+            (Lang::Ja, true) => {
+                "HTTP/3 は広告されている (alt-svc) が QUIC ハンドシェイクは失敗 — UDP 443 遮断の可能性があるが、上記のより大きな問題に付随する所見".into()
+            }
+            (Lang::Ja, false) => {
+                "QUIC ハンドシェイクは失敗 (このレスポンスでは HTTP/3 が広告されていないため、実害は無い可能性が高い)".into()
+            }
+        },
+        QuicTimeoutNoH3Expected => match lang {
+            Lang::En => {
+                "QUIC (UDP 443) got no response, but this server does not advertise HTTP/3 here — likely just unsupported on this IP, not a network block".into()
+            }
+            Lang::Ja => {
+                "QUIC (UDP 443) は無応答だが、このサーバはここで HTTP/3 を広告していない — ネットワーク遮断ではなく、この IP では単に未対応の可能性が高い".into()
+            }
         },
     }
 }

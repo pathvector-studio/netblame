@@ -6,7 +6,7 @@
 
 use crate::i18n::{self, Lang};
 use crate::probe::trace::{self, HopZone};
-use crate::report::{DnsOutcome, Report, TcpOutcome, TraceData, TraceReport};
+use crate::report::{DnsOutcome, QuicOutcome, Report, TcpOutcome, TraceData, TraceReport};
 use serde::Serialize;
 
 /// 犯人カテゴリ
@@ -36,6 +36,8 @@ pub enum Culprit {
     UnstablePath,
     /// PMTUD ブラックホール (経路 MTU 制限 + ICMP 通知の欠落)
     PmtuBlackhole,
+    /// UDP 443 (QUIC) がブロックされている — TCP/TLS/HTTP は正常
+    Udp443Blocked,
     /// サーバの応答が遅い (ネットワークは正常)
     ServerSlow,
     /// サーバがダウンしている / ポートが閉じている
@@ -60,6 +62,7 @@ impl Culprit {
             Culprit::ProxyInterference => "proxy_interference",
             Culprit::UnstablePath => "unstable_path",
             Culprit::PmtuBlackhole => "pmtu_blackhole",
+            Culprit::Udp443Blocked => "udp443_blocked",
             Culprit::ServerSlow => "server_slow",
             Culprit::ServerDown => "server_down",
             Culprit::NoProblem => "no_problem",
@@ -86,6 +89,7 @@ pub enum Headline {
     ServerSlow,
     UnstablePath,
     PmtuBlackhole,
+    Udp443Blocked,
     NoProblem,
 }
 
@@ -133,6 +137,9 @@ pub enum Evidence {
     AllStagesOk,
     LastRespondingHop { ip: String, index: u8, path_len: u8 },
     PmtuBlackholeObserved { mtu: u16 },
+    TcpTlsHttpHealthySoQuicIsolated,
+    QuicAllTimedOut,
+    Udp443LikelyFiltered,
 }
 
 /// 【所見】(副次的な発見) 1項目。
@@ -152,6 +159,13 @@ pub enum Finding {
     CertExpiresSoon {
         days: i64,
     },
+    /// QUIC/HTTP3 が壊れているが、他に主犯となる大きな問題があるので副次的に記録
+    QuicBrokenSecondary {
+        h3_advertised: bool,
+    },
+    /// h3 が広告されていない状態での QUIC タイムアウトは想定内 (サーバがその IP で
+    /// h3 を提供していないだけの可能性が高い) なので、副次的な所見に留める
+    QuicTimeoutNoH3Expected,
 }
 
 /// 判定結果 (構造化データ)。文字列化は `render` で行う。
@@ -231,9 +245,37 @@ pub fn judge(report: &Report) -> Verdict {
     let mut secondary = collect_secondary(report, &d, &t);
 
     let mut verdict = judge_primary(report, &d, &t);
+    // QUIC/HTTP3 の副次所見は主犯が何になったか (特に Udp443Blocked かどうか)
+    // に依存するため、主判定の後に追加する
+    secondary.extend(collect_quic_secondary(report, verdict.culprit));
     verdict.secondary.append(&mut secondary);
     attach_trace_hint(report, &mut verdict);
     verdict
+}
+
+/// QUIC/HTTP3 に関する副次所見を集める。
+/// - 主犯が既に Udp443Blocked ならそちらで説明済みなので何も足さない
+/// - QUIC がタイムアウトしたが h3 が広告されていない場合は「想定内」の注記
+/// - QUIC がタイムアウト/失敗し、かつ他に大きな主犯がついた場合は「副次的」の注記
+fn collect_quic_secondary(report: &Report, culprit: Culprit) -> Vec<Finding> {
+    let mut s = Vec::new();
+    if culprit == Culprit::Udp443Blocked {
+        return s;
+    }
+    let Some(quic) = &report.quic else {
+        return s;
+    };
+    let h3_advertised = report.http.as_ref().is_some_and(|h| h.h3_advertised);
+    match &quic.outcome {
+        QuicOutcome::Timeout if !h3_advertised => {
+            s.push(Finding::QuicTimeoutNoH3Expected);
+        }
+        QuicOutcome::Timeout if culprit != Culprit::NoProblem => {
+            s.push(Finding::QuicBrokenSecondary { h3_advertised });
+        }
+        _ => {}
+    }
+    s
 }
 
 /// 実行済みの経路トレースデータがあれば取り出す
@@ -627,7 +669,30 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
         }
     }
 
-    // 12. 問題なし
+    // 12. UDP 443 (QUIC) ブロック: TCP/TLS/HTTP は全て健全、かつ h3 が
+    // 広告されている (alt-svc) のに QUIC ハンドシェイクが全滅 (無応答) の
+    // ときだけ主犯にする。他に大きな問題があるときはここまで到達しない
+    // (= 副次所見として collect_secondary 側で扱う) ため、優先度は最低。
+    if t.any_ok && tcp_tls_http_all_healthy(report) {
+        if let Some(quic) = &report.quic {
+            if quic.outcome == QuicOutcome::Timeout {
+                let h3_advertised = report.http.as_ref().is_some_and(|h| h.h3_advertised);
+                if h3_advertised {
+                    return Verdict::new(
+                        Culprit::Udp443Blocked,
+                        Headline::Udp443Blocked,
+                        vec![
+                            Evidence::TcpTlsHttpHealthySoQuicIsolated,
+                            Evidence::QuicAllTimedOut,
+                            Evidence::Udp443LikelyFiltered,
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    // 13. 問題なし
     let mut ev = Vec::new();
     if d.ran && d.any_ok {
         ev.push(Evidence::DnsHealthy);
@@ -663,6 +728,16 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
         ev.push(Evidence::AllStagesOk);
     }
     Verdict::new(Culprit::NoProblem, Headline::NoProblem, ev)
+}
+
+/// TCP/TLS/HTTP が全てエラーなく完了しているか (QUIC 判定の前提条件)
+fn tcp_tls_http_all_healthy(report: &Report) -> bool {
+    let tls_ok = report.tls.as_ref().is_none_or(|t| t.verified);
+    let http_ok = report
+        .http
+        .as_ref()
+        .is_none_or(|h| h.error.is_none() && h.status.is_some_and(|s| (200..400).contains(&s)));
+    tls_ok && http_ok
 }
 
 fn tls_failed(report: &Report) -> bool {
@@ -820,6 +895,16 @@ mod tests {
             ttfb_ms: Some(80.0),
             total_ms: Some(120.0),
             error: None,
+            h3_advertised: false,
+            alt_svc: None,
+        }
+    }
+
+    fn healthy_http_with_h3() -> HttpReport {
+        HttpReport {
+            h3_advertised: true,
+            alt_svc: Some(r#"h3=":443"; ma=86400"#.into()),
+            ..healthy_http()
         }
     }
 
@@ -855,6 +940,7 @@ mod tests {
             },
             tls: Some(healthy_tls()),
             http: Some(healthy_http()),
+            quic: None,
             path: Some(healthy_path()),
             trace: None,
         }
@@ -1320,5 +1406,118 @@ mod tests {
         assert!(en.evidence.iter().any(|e| e.contains("NXDOMAIN")));
         let ja = v.render(Lang::Ja);
         assert!(ja.headline.contains("「example.com」は存在しません"));
+    }
+
+    // ── QUIC/HTTP3 (v0.4) ───────────────────────────────────────────────
+
+    #[test]
+    fn udp443_blocked_when_everything_else_healthy() {
+        // TCP/TLS/HTTP は全て正常、h3 は広告されているのに QUIC が全滅
+        let mut r = base_report();
+        r.http = Some(healthy_http_with_h3());
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        assert_eq!(judge(&r).culprit, Culprit::Udp443Blocked);
+    }
+
+    #[test]
+    fn udp443_blocked_not_picked_when_tcp_also_dead() {
+        // TCP が全滅している場合は TcpBlocked が主犯になり、
+        // Udp443Blocked に食われてはならない
+        let mut r = base_report();
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = Some(healthy_http_with_h3());
+        r.path = None;
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        assert_eq!(judge(&r).culprit, Culprit::TcpBlocked);
+    }
+
+    #[test]
+    fn quic_timeout_without_h3_advertised_stays_no_problem() {
+        // h3 が広告されていない状態での QUIC タイムアウトは「想定内」であり、
+        // 主犯にはならず NoProblem のまま、副次所見に留まる
+        let mut r = base_report();
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::NoProblem);
+        assert!(v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::QuicTimeoutNoH3Expected)));
+    }
+
+    #[test]
+    fn quic_broken_alongside_bigger_problem_is_secondary_note() {
+        // 他に大きな問題 (TLS 証明書期限切れ) があるときは、
+        // QUIC の不調は副次的な所見として付随するだけで主犯にはならない
+        let mut r = base_report();
+        let tls = r.tls.as_mut().unwrap();
+        tls.verified = false;
+        tls.cert_expired = true;
+        tls.days_until_expiry = Some(-30);
+        tls.error = Some("certificate expired".into());
+        r.http = Some(healthy_http_with_h3());
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::TlsCertExpired);
+        assert!(v.secondary.iter().any(|s| matches!(
+            s,
+            Finding::QuicBrokenSecondary {
+                h3_advertised: true
+            }
+        )));
+    }
+
+    #[test]
+    fn quic_handshake_error_is_never_a_verdict() {
+        // サーバは応答したがネゴシエーション失敗 (HandshakeError) はネットワーク
+        // 遮断の証拠ではないので、主犯にも副次所見にもならない
+        let mut r = base_report();
+        r.http = Some(healthy_http_with_h3());
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::HandshakeError("no_application_protocol".into()),
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::NoProblem);
+        assert!(!v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::QuicBrokenSecondary { .. })));
+    }
+
+    #[test]
+    fn render_udp443_blocked_en_and_ja() {
+        let mut r = base_report();
+        r.http = Some(healthy_http_with_h3());
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::Udp443Blocked);
+        let en = v.render(Lang::En);
+        assert_eq!(en.culprit_code, "udp443_blocked");
+        assert!(en.headline.contains("UDP 443"));
+        assert!(en
+            .evidence
+            .iter()
+            .any(|e| e.contains("firewall is most likely dropping UDP 443")));
+        assert!(en.next_step.contains("firewall rules for UDP 443"));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("UDP 443"));
+        assert!(ja
+            .evidence
+            .iter()
+            .any(|e| e.contains("ファイアウォールが UDP 443 を落としている可能性が高い")));
+        assert!(ja
+            .next_step
+            .contains("FW ルールで UDP 443 を確認してください"));
     }
 }

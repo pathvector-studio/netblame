@@ -54,6 +54,8 @@ netblame <target> [flags]
 
 **経路トレースの自動起動**: `--trace` を付けなくても、前段のステージで経路系の問題 (TCP タイムアウト / パケットロス > 0% / ジッタ大) が見つかったときだけ自動で実行されます。最悪 15〜30 秒ほどかかるため、健全時はスキップされます。トレースは tracepath 方式 (UDP + `IP_RECVERR`) で **root 権限不要**、ただし **Linux のみ対応**です (他 OS ではその旨を表示してスキップ)。
 
+**QUIC/HTTP3 プローブ**: フラグ不要で、https ターゲットに対してのみ HTTP ステージの直後に自動実行されます。Linux / macOS 両対応です。
+
 **終了コード**: `0` = 問題なし / `1` = 問題を検出 / `2` = 使い方・内部エラー
 
 ## 実行例 (実出力)
@@ -153,6 +155,36 @@ $ netblame example.com:81 --timeout 2
 
 TCP タイムアウト検出により経路トレースが自動起動しています。トレースが途中のホップで止まる場合は、止まった位置に応じて「宅内 (ホップ 1-2) / ISP 網内 (序盤) / 対岸 (奥)」の切り分けガイダンスが【次の一手】に追記されます。
 
+### QUIC/HTTP3 (v0.4)
+
+```
+$ netblame https://cloudflare.com
+
+── HTTP
+  ✓ リダイレクト: 301 -> https://www.cloudflare.com/
+  ✓ GET https://cloudflare.com/ → 200 (DNS 0ms / 接続 21ms / TLS 32ms / TTFB 293ms / 合計 482ms)
+
+── QUIC/HTTP3
+  ✓ QUIC ハンドシェイク成功: 22ms (h3)
+  ✓ alt-svc で HTTP/3 が広告されています: h3=":443"; ma=86400
+```
+
+UDP 443 がファイアウォールで落とされている環境では、TCP/TLS/HTTP は正常なまま QUIC だけがタイムアウトし、以下のように判定されます:
+
+```
+── QUIC/HTTP3
+  ✗ UDP 443 応答なし (タイムアウト)
+
+【判定】 TCP は正常ですが、UDP 443 (QUIC/HTTP3) には全く到達できません
+【根拠】
+  ・TCP 443 は正常 (TLS ハンドシェイク・HTTP リクエストともに成功) — 問題は UDP 443 に限定されている
+  ・QUIC ハンドシェイクの試行が全て無応答
+  ・TCP 443 は正常だが UDP 443 の QUIC が全て無応答 — ファイアウォールが UDP 443 を落としている可能性が高い
+【次の一手】 ブラウザは HTTP/2 にフォールバックするため気づきにくいが、初回接続の遅延や HTTP/3 前提のサービスで問題になります。FW ルールで UDP 443 を確認してください
+```
+
+この判定は意図的に最低優先度です。他に大きな問題があるときは QUIC の不調は【所見】に格下げされ、HTTP/3 が広告されていないサーバでの QUIC タイムアウトは想定内として主犯にはなりません。
+
 ### 期限切れ証明書
 
 ```
@@ -179,15 +211,16 @@ $ netblame https://expired.badssl.com --samples 2
 2. **DNS** (`dns.rs`) — 4 系統で名前解決して比較: (a) システムリゾルバ (getaddrinfo)、(b) resolv.conf の各ネームサーバへの直接クエリ (hickory-resolver)、(c) 1.1.1.1、(d) 8.8.8.8。系統ごとに回答 IP・結果コード (OK/NXDOMAIN/SERVFAIL/タイムアウト)・レイテンシを記録
 3. **TCP** (`tcp.rs`) — 解決済み IP 最大 3 つ (IPv4/IPv6 両方を含むよう選択) に N 回接続し、成功率と min/avg/max を計測。refused (ポート閉) / timeout (フィルタ) を区別
 4. **TLS** (`tls.rs`) — rustls + webpki-roots で検証つきハンドシェイク。TLS バージョン・証明書の残り有効日数・ホスト名一致を記録。検証失敗時は**無検証 (読み取り専用・診断目的のみ)** で再接続して提示された証明書の発行者を取得し、Zscaler / FortiGate 等のミドルボックス痕跡があれば TLS 傍受の疑いを立てる
-5. **HTTP** (`http.rs`) — reqwest (rustls バックエンド) で GET。ステータス・リダイレクトチェーン (最大 5)・TTFB・合計時間を計測し、DNS/接続/TLS の内訳は各ステージの実測値を転記
-6. **経路品質** (`path.rs`) — 主要 IP へ TCP connect ping を N 回打ち、ロス率・平均 RTT・ジッタ (標準偏差) を算出
-7. **経路トレース** (`trace.rs`, Linux のみ・root 不要) — tracepath 方式の traceroute。非特権 UDP ソケットに `IP_RECVERR` を設定し、`MSG_ERRQUEUE` 経由で ICMP time-exceeded / port-unreachable を受信してホップごとのルータアドレスと RTT を記録 (TTL 1〜30、各 2 プローブ・1 秒タイムアウト)。さらに `IP_PMTUDISC_PROBE` で DF ビット付きデータグラム (1500→1024 バイト) を送り、経路 MTU と「超過パケットが ICMP 通知なしで消えるか」(PMTUD ブラックホールの兆候) を観測
+5. **HTTP** (`http.rs`) — reqwest (rustls バックエンド) で GET。ステータス・リダイレクトチェーン (最大 5)・TTFB・合計時間を計測し、DNS/接続/TLS の内訳は各ステージの実測値を転記。あわせて alt-svc 応答ヘッダを取得し、HTTP/3 (`h3`) が広告されているかを記録
+6. **QUIC/HTTP3** (`quic.rs`) — HTTP ステージの後、**https ターゲットのみ**で実行。解決済み IP に対して ALPN `h3` で実際に QUIC ハンドシェイクを試行 (TLS ステージと同じ検証方針の rustls + webpki-roots) し、ハンドシェイク時間を計測。成功、タイムアウト (何も返ってこない = UDP 443 ブロックの兆候)、ハンドシェイクエラー (サーバは応答したがネゴシエーション失敗 = ネットワークの問題ではない)、ローカルエラーを区別
+7. **経路品質** (`path.rs`) — 主要 IP へ TCP connect ping を N 回打ち、ロス率・平均 RTT・ジッタ (標準偏差) を算出
+8. **経路トレース** (`trace.rs`, Linux のみ・root 不要) — tracepath 方式の traceroute。非特権 UDP ソケットに `IP_RECVERR` を設定し、`MSG_ERRQUEUE` 経由で ICMP time-exceeded / port-unreachable を受信してホップごとのルータアドレスと RTT を記録 (TTL 1〜30、各 2 プローブ・1 秒タイムアウト)。さらに `IP_PMTUDISC_PROBE` で DF ビット付きデータグラム (1500→1024 バイト) を送り、経路 MTU と「超過パケットが ICMP 通知なしで消えるか」(PMTUD ブラックホールの兆候) を観測
 
 ### 判定エンジン (src/verdict.rs)
 
 `fn judge(report: &Report) -> Verdict` は **I/O を持たない純粋関数**で、証拠から犯人カテゴリを 1 つ選びます (ユニットテストで検証)。
 
-犯人カテゴリ: `LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `ServerSlow` / `ServerDown` / `NoProblem`
+犯人カテゴリ: `LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `Udp443Blocked` / `ServerSlow` / `ServerDown` / `NoProblem`
 
 判定の考え方 (優先度順):
 
@@ -201,15 +234,16 @@ $ netblame https://expired.badssl.com --samples 2
 - 接続は速い (<100ms) のに TTFB が遅い (>1000ms) → **サーバが遅い。ネットワークは正常**
 - ロス ≥10% またはジッタ >50ms → 経路不安定
 - TCP は通るのに、経路 MTU が 1500 未満 **かつ** 超過 DF プローブが ICMP 通知なしで消える → **`PmtuBlackhole`** — 小さい通信は通るのに大きい転送だけ止まる VPN/トンネルの典型事故。次の一手は トンネル MTU の確認 / MSS clamp
+- TCP・TLS・HTTP が全て健全、alt-svc で HTTP/3 が広告されている **かつ** QUIC ハンドシェイクが全て無応答 → **`Udp443Blocked`** — ファイアウォールが UDP 443 を落としている可能性が高い。意図的に**最低優先度**の判定であり、他により大きな問題があればそちらが主犯になり QUIC の所見は【所見】に格下げされる。そもそも HTTP/3 が広告されていない場合の QUIC タイムアウトは想定内であり、主犯にはならず【所見】止まり
 - 経路系の判定 (`TcpBlocked` / `ServerDown` / `UnstablePath`) でホップ情報がある場合、根拠に「最後に応答したホップ: <ip> (ホップ N / 推定経路長 ~M)」を追加し、止まった位置に応じて宅内 (ホップ 1-2) / ISP 網内 (序盤) / 対岸 (奥) の切り分けガイダンスを【次の一手】に追記
 - ローカル DNS >200ms でパブリック <100ms → ローカル DNS が遅い
 
-主犯にならなかった所見 (hosts 上書き、プロキシ検出、CDN による回答差、証明書の残日数僅少) は【所見】として併記します。
+主犯にならなかった所見 (hosts 上書き、プロキシ検出、CDN による回答差、証明書の残日数僅少、非致命的な QUIC/HTTP3 異常) は【所見】として併記します。
 
 ## 開発
 
 ```bash
-cargo test           # 判定エンジン + トレース解析 + パーサのユニットテスト (50 件)
+cargo test           # 判定エンジン + トレース解析 + パーサのユニットテスト (59 件)
 cargo clippy         # 警告ゼロ
 cargo build --release
 ```
@@ -229,7 +263,7 @@ runs: 42 / ok: 40 (95%)
 
 ## 今後の拡張
 
-[ROADMAP.md](ROADMAP.md) を参照。QUIC/HTTP3 チェック、レポート共有を予定。
+[ROADMAP.md](ROADMAP.md) を参照。レポート共有を予定。
 
 ## ライセンス
 

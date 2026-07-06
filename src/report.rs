@@ -160,6 +160,34 @@ pub struct HttpReport {
     /// ボディ受信完了までの合計時間
     pub total_ms: Option<f64>,
     pub error: Option<String>,
+    /// 最終応答の alt-svc ヘッダに h3 が含まれるか (HTTP/3 が広告されているか)
+    pub h3_advertised: bool,
+    /// alt-svc ヘッダの生値 (あれば)
+    pub alt_svc: Option<String>,
+}
+
+/// QUIC ハンドシェイクの結果分類
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "code", content = "detail")]
+pub enum QuicOutcome {
+    /// ハンドシェイク成功
+    Ok {
+        handshake_ms: f64,
+        /// ネゴシエートされた ALPN (例: "h3")
+        negotiated_alpn: Option<String>,
+    },
+    /// 何も返ってこない (UDP 443 ブロックの兆候)
+    Timeout,
+    /// サーバは応答したが、ネゴシエーションに失敗した (ネットワーク遮断ではない)
+    HandshakeError(String),
+    /// ローカル側のエラー (ソケット確保失敗など)
+    LocalError(String),
+}
+
+/// ステージ: QUIC/HTTP3 (https ターゲットでのみ実行)
+#[derive(Debug, Clone, Serialize)]
+pub struct QuicReport {
+    pub outcome: QuicOutcome,
 }
 
 /// ステージ6: 経路品質
@@ -246,6 +274,7 @@ pub struct Report {
     pub tcp: TcpReport,
     pub tls: Option<TlsReport>,
     pub http: Option<HttpReport>,
+    pub quic: Option<QuicReport>,
     pub path: Option<PathReport>,
     pub trace: Option<TraceReport>,
 }

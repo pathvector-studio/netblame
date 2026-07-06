@@ -11,7 +11,7 @@
 
 ## v0.4
 
-- [ ] QUIC/HTTP3 チェック — 「UDP 443 だけブロックされて HTTP/3 が壊れる」事故の検出
+- ✅ QUIC/HTTP3 チェック — 「UDP 443 だけブロックされて HTTP/3 が壊れる」事故の検出。https ターゲットで HTTP ステージ後に実際の QUIC (ALPN h3) ハンドシェイクを試行し、alt-svc の h3 広告と突き合わせて `Udp443Blocked` を判定(TCP/TLS/HTTP が全て健全な場合のみ主犯にする低優先度の判定)
 - [ ] レポート共有 — `--share` で `--json` レポートをアップロードして共有 URL を発行(share.pathvector.dev 構想)
 
 ## v1.0
