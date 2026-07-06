@@ -2,6 +2,7 @@
 //! 解決済み IP (最大3つ、v4/v6 両方を含むよう選択) へ N 回接続し、
 //! 成功率とハンドシェイク時間を計測する。
 
+use crate::i18n::{self, Lang};
 use crate::report::{TcpOutcome, TcpProbe, TcpReport};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -57,7 +58,13 @@ async fn connect_once(addr: SocketAddr, timeout: Duration) -> Result<f64, TcpOut
 }
 
 /// 1つの IP に対して samples 回接続を試す
-pub async fn probe_ip(ip: IpAddr, port: u16, samples: u32, timeout: Duration) -> TcpProbe {
+pub async fn probe_ip(
+    ip: IpAddr,
+    port: u16,
+    samples: u32,
+    timeout: Duration,
+    lang: Lang,
+) -> TcpProbe {
     let addr = SocketAddr::new(ip, port);
     let mut times = Vec::new();
     let mut failures: Vec<TcpOutcome> = Vec::new();
@@ -85,7 +92,7 @@ pub async fn probe_ip(ip: IpAddr, port: u16, samples: u32, timeout: Duration) ->
             failures
                 .into_iter()
                 .next()
-                .unwrap_or(TcpOutcome::Error("試行なし".into()))
+                .unwrap_or(TcpOutcome::Error(i18n::probe_no_attempts(lang)))
         }
     };
 
@@ -111,11 +118,17 @@ pub async fn probe_ip(ip: IpAddr, port: u16, samples: u32, timeout: Duration) ->
 }
 
 /// TCP ステージを実行する
-pub async fn run(ips: &[IpAddr], port: u16, samples: u32, timeout: Duration) -> TcpReport {
+pub async fn run(
+    ips: &[IpAddr],
+    port: u16,
+    samples: u32,
+    timeout: Duration,
+    lang: Lang,
+) -> TcpReport {
     let targets = pick_targets(ips);
     let mut probes = Vec::new();
     for ip in targets {
-        probes.push(probe_ip(ip, port, samples, timeout).await);
+        probes.push(probe_ip(ip, port, samples, timeout, lang).await);
     }
     TcpReport { probes }
 }

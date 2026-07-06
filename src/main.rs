@@ -1,41 +1,53 @@
-//! netblame — 「それ、本当にネットワークのせい?」
-//! URL/ホストに対して段階診断 (環境→DNS→TCP→TLS→HTTP→経路品質) を行い、
-//! 最も可能性の高い犯人を平易な日本語で名指しする。
+//! netblame — "Is it really the network's fault?"
+//! Runs a staged diagnosis (environment → DNS → TCP → TLS → HTTP → path
+//! quality) against a URL/host and names the most likely culprit, with
+//! evidence, in plain English or Japanese.
 
+mod i18n;
 mod probe;
 mod report;
 mod verdict;
 
 use clap::Parser;
+use i18n::{msg, Lang, MsgKey};
 use owo_colors::{OwoColorize, Stream::Stdout};
 use report::{DnsOutcome, Report, TargetInfo, TcpOutcome};
 use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::Duration;
-use verdict::{judge, Culprit};
+use verdict::{judge, Culprit, RenderedVerdict, Verdict};
 
-/// それ、本当にネットワークのせい? — 段階診断で犯人を名指しする CLI
+/// Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence.
 #[derive(Parser, Debug)]
 #[command(name = "netblame", version, about, arg_required_else_help = true)]
 struct Args {
-    /// 診断対象: URL (https://example.com/path) または host[:port]
+    /// Diagnosis target: a URL (https://example.com/path) or host[:port]
     target: String,
 
-    /// 機械可読な JSON レポートを出力する
+    /// Emit a machine-readable JSON report
     #[arg(long)]
     json: bool,
 
-    /// 各プローブのタイムアウト秒数
+    /// Per-probe timeout in seconds
     #[arg(long, default_value_t = 5)]
     timeout: u64,
 
-    /// レイテンシ計測のサンプル数
+    /// Number of latency samples
     #[arg(long, default_value_t = 5)]
     samples: u32,
 
-    /// 色つき出力を無効にする
+    /// Disable colored output
     #[arg(long)]
     no_color: bool,
+
+    /// Output language (default: auto-detect from LC_ALL/LC_MESSAGES/LANG)
+    #[arg(long, value_enum)]
+    lang: Option<Lang>,
+
+    /// Repeat the diagnosis every SECS seconds (default 30) and print a
+    /// timestamped timeline; Ctrl-C stops and prints a summary
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "30")]
+    watch: Option<u64>,
 }
 
 /// パース済みターゲット
@@ -48,13 +60,22 @@ struct Target {
     path: String,
 }
 
-fn parse_target(raw: &str) -> Result<Target, String> {
+/// ターゲット文字列のパースエラー (文言は i18n::parse_error が担当)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseError {
+    UnsupportedScheme(String),
+    EmptyHost,
+    UnclosedIpv6,
+    InvalidPort(String),
+}
+
+fn parse_target(raw: &str) -> Result<Target, ParseError> {
     let (scheme, rest) = if let Some(r) = raw.strip_prefix("https://") {
         (Some(true), r)
     } else if let Some(r) = raw.strip_prefix("http://") {
         (Some(false), r)
     } else if raw.contains("://") {
-        return Err(format!("未対応のスキームです: {raw}"));
+        return Err(ParseError::UnsupportedScheme(raw.to_string()));
     } else {
         (None, raw)
     };
@@ -64,20 +85,18 @@ fn parse_target(raw: &str) -> Result<Target, String> {
         None => (rest, "/".to_string()),
     };
     if hostport.is_empty() {
-        return Err("ホスト名が空です".to_string());
+        return Err(ParseError::EmptyHost);
     }
 
     // IPv6 リテラル [::1]:443 に対応
     let (host, explicit_port) = if let Some(rest6) = hostport.strip_prefix('[') {
-        let end = rest6
-            .find(']')
-            .ok_or_else(|| "IPv6 リテラルの ']' がありません".to_string())?;
+        let end = rest6.find(']').ok_or(ParseError::UnclosedIpv6)?;
         let host = rest6[..end].to_string();
         let after = &rest6[end + 1..];
         let port = if let Some(p) = after.strip_prefix(':') {
             Some(
                 p.parse::<u16>()
-                    .map_err(|_| format!("ポート番号が不正です: {p}"))?,
+                    .map_err(|_| ParseError::InvalidPort(p.to_string()))?,
             )
         } else {
             None
@@ -92,7 +111,7 @@ fn parse_target(raw: &str) -> Result<Target, String> {
                 h.to_string(),
                 Some(
                     p.parse::<u16>()
-                        .map_err(|_| format!("ポート番号が不正です: {p}"))?,
+                        .map_err(|_| ParseError::InvalidPort(p.to_string()))?,
                 ),
             )
         }
@@ -122,15 +141,16 @@ fn parse_target(raw: &str) -> Result<Target, String> {
 
 struct Printer {
     quiet: bool,
+    lang: Lang,
 }
 
 impl Printer {
-    fn section(&self, name: &str) {
+    fn section(&self, key: MsgKey) {
         if !self.quiet {
             println!(
                 "\n{} {}",
                 "──".if_supports_color(Stdout, |t| t.dimmed()),
-                name.if_supports_color(Stdout, |t| t.bold())
+                msg(self.lang, key).if_supports_color(Stdout, |t| t.bold())
             );
         }
     }
@@ -159,102 +179,73 @@ fn fmt_ms(ms: Option<f64>) -> String {
     ms.map_or("-".to_string(), |v| format!("{v:.0}ms"))
 }
 
-#[tokio::main]
-async fn main() {
-    // rustls の暗号プロバイダ (ring) をプロセス既定として登録
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
-    let args = Args::parse();
-
-    if args.no_color || !std::io::stdout().is_terminal() {
-        owo_colors::set_override(false);
-    }
-
-    let target = match parse_target(&args.target) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("エラー: {e}");
-            std::process::exit(2);
-        }
-    };
-
-    let timeout = Duration::from_secs(args.timeout.max(1));
-    let samples = args.samples.max(1);
-    let p = Printer { quiet: args.json };
-
-    if !args.json {
-        println!(
-            "{} {} (port {}) を診断します…",
-            "netblame:".if_supports_color(Stdout, |t| t.bold()),
-            target.host.if_supports_color(Stdout, |t| t.cyan()),
-            target.port
-        );
-    }
+/// 全ステージを実行して Report と Verdict を返す。
+/// `p.quiet` が false ならステージごとの結果を逐次表示する。
+async fn diagnose(
+    target: &Target,
+    timeout: Duration,
+    samples: u32,
+    p: &Printer,
+) -> (Report, Verdict) {
+    let lang = p.lang;
 
     // ── ステージ1: 環境 ─────────────────────────────
-    p.section("環境");
+    p.section(MsgKey::StageEnv);
     let env_report = probe::env::run(&target.host);
     if env_report.nameservers.is_empty() {
-        p.warn("resolv.conf にネームサーバが見つかりません");
+        p.warn(msg(lang, MsgKey::NoNameservers));
     } else {
-        p.ok(&format!(
-            "ネームサーバ: {}",
-            env_report
+        p.ok(&i18n::nameservers_line(
+            lang,
+            &env_report
                 .nameservers
                 .iter()
                 .map(|ip| ip.to_string())
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
         ));
     }
     if !env_report.search_domains.is_empty() {
-        p.ok(&format!(
-            "search ドメイン: {}",
-            env_report.search_domains.join(", ")
+        p.ok(&i18n::search_domains_line(
+            lang,
+            &env_report.search_domains.join(", "),
         ));
     }
     match &env_report.hosts_override {
-        Some(ip) => p.warn(&format!(
-            "/etc/hosts が {} を {} に上書きしています",
-            target.host, ip
-        )),
-        None => p.ok("/etc/hosts: 上書きなし"),
+        Some(ip) => p.warn(&i18n::hosts_override_line(lang, &target.host, ip)),
+        None => p.ok(msg(lang, MsgKey::HostsNoOverride)),
     }
     if env_report.proxies.is_empty() {
-        p.ok("プロキシ環境変数: なし");
+        p.ok(msg(lang, MsgKey::NoProxyVars));
     } else {
         for (k, v) in &env_report.proxies {
-            p.warn(&format!("プロキシ検出: {k}={v}"));
+            p.warn(&i18n::proxy_detected_line(lang, k, v));
         }
     }
 
     // ── ステージ2: DNS ─────────────────────────────
-    p.section("DNS");
-    let dns_report = probe::dns::run(&target.host, &env_report.nameservers, timeout).await;
+    p.section(MsgKey::StageDns);
+    let dns_report = probe::dns::run(&target.host, &env_report.nameservers, timeout, lang).await;
     if dns_report.skipped {
-        p.ok("ターゲットは IP リテラルのため名前解決をスキップ");
+        p.ok(msg(lang, MsgKey::DnsSkippedIpLiteral));
     } else {
         for src in &dns_report.sources {
             match &src.outcome {
-                DnsOutcome::Ok => p.ok(&format!(
-                    "{}: {} 件の回答 ({}) [{}]",
-                    src.label,
+                DnsOutcome::Ok => p.ok(&i18n::dns_ok_line(
+                    lang,
+                    &src.label,
                     src.ips.len(),
-                    fmt_ms(src.latency_ms),
-                    src.ips
+                    &fmt_ms(src.latency_ms),
+                    &src.ips
                         .iter()
                         .map(|ip| ip.to_string())
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(", "),
                 )),
-                DnsOutcome::NxDomain => {
-                    p.fail(&format!("{}: NXDOMAIN (名前が存在しない)", src.label))
-                }
-                DnsOutcome::ServFail => p.fail(&format!("{}: SERVFAIL", src.label)),
-                DnsOutcome::Timeout => p.fail(&format!("{}: タイムアウト", src.label)),
-                DnsOutcome::Error(e) => p.fail(&format!("{}: {}", src.label, e)),
+                DnsOutcome::NxDomain => p.fail(&i18n::dns_nxdomain_line(lang, &src.label)),
+                DnsOutcome::ServFail => p.fail(&i18n::dns_servfail_line(lang, &src.label)),
+                DnsOutcome::Timeout => p.fail(&i18n::dns_timeout_line(lang, &src.label)),
+                DnsOutcome::Error(e) => p.fail(&i18n::dns_error_line(lang, &src.label, e)),
             }
         }
     }
@@ -273,36 +264,28 @@ async fn main() {
     };
 
     // ── ステージ3: TCP ─────────────────────────────
-    p.section("TCP");
+    p.section(MsgKey::StageTcp);
     let tcp_report = if resolved_ips.is_empty() {
-        p.fail("接続先 IP がありません (名前解決に失敗)");
+        p.fail(msg(lang, MsgKey::NoResolvedIps));
         report::TcpReport::default()
     } else {
-        let r = probe::tcp::run(&resolved_ips, target.port, samples, timeout).await;
+        let r = probe::tcp::run(&resolved_ips, target.port, samples, timeout, lang).await;
         for probe in &r.probes {
-            let fam = if probe.ip.is_ipv6() { "IPv6" } else { "IPv4" };
             match &probe.outcome {
-                TcpOutcome::Ok => p.ok(&format!(
-                    "{} {}:{} 接続成功 {}/{} (min/avg/max {}/{}/{})",
-                    fam,
-                    probe.ip,
+                TcpOutcome::Ok => p.ok(&i18n::tcp_ok_line(
+                    lang,
+                    &probe.ip,
                     probe.port,
                     probe.successes,
                     probe.samples,
-                    fmt_ms(probe.min_ms),
-                    fmt_ms(probe.avg_ms),
-                    fmt_ms(probe.max_ms)
+                    &fmt_ms(probe.min_ms),
+                    &fmt_ms(probe.avg_ms),
+                    &fmt_ms(probe.max_ms),
                 )),
-                TcpOutcome::Refused => p.fail(&format!(
-                    "{} {}:{} 接続拒否 (ポートは閉じているがホストは生存)",
-                    fam, probe.ip, probe.port
-                )),
-                TcpOutcome::Timeout => p.fail(&format!(
-                    "{} {}:{} タイムアウト (フィルタ/到達不能)",
-                    fam, probe.ip, probe.port
-                )),
+                TcpOutcome::Refused => p.fail(&i18n::tcp_refused_line(lang, &probe.ip, probe.port)),
+                TcpOutcome::Timeout => p.fail(&i18n::tcp_timeout_line(lang, &probe.ip, probe.port)),
                 TcpOutcome::Error(e) => {
-                    p.fail(&format!("{} {}:{} 失敗: {}", fam, probe.ip, probe.port, e))
+                    p.fail(&i18n::tcp_error_line(lang, &probe.ip, probe.port, e))
                 }
             }
         }
@@ -320,45 +303,45 @@ async fn main() {
 
     // ── ステージ4: TLS ─────────────────────────────
     let tls_report = if target.use_tls {
-        p.section("TLS");
+        p.section(MsgKey::StageTls);
         match primary_ip {
             Some(ip) if tcp_any_ok => {
-                let r = probe::tls::run(&target.host, ip, target.port, timeout).await;
+                let r = probe::tls::run(&target.host, ip, target.port, timeout, lang).await;
                 if r.verified {
-                    p.ok(&format!(
-                        "ハンドシェイク成功: {} ({})",
+                    p.ok(&i18n::tls_handshake_ok_line(
+                        lang,
                         r.version.as_deref().unwrap_or("?"),
-                        fmt_ms(r.handshake_ms)
+                        &fmt_ms(r.handshake_ms),
                     ));
                     if let Some(days) = r.days_until_expiry {
                         if days < 0 {
-                            p.fail(&format!("証明書は {} 日前に失効", -days));
+                            p.fail(&i18n::cert_expired_ago_line(lang, -days));
                         } else if days <= 14 {
-                            p.warn(&format!("証明書の残り有効期間: {days} 日"));
+                            p.warn(&i18n::cert_days_left_line(lang, days));
                         } else {
-                            p.ok(&format!("証明書の残り有効期間: {days} 日"));
+                            p.ok(&i18n::cert_days_left_line(lang, days));
                         }
                     }
-                    p.ok("証明書チェーン検証: OK / ホスト名一致");
+                    p.ok(msg(lang, MsgKey::CertChainOk));
                 } else {
-                    p.fail(&format!(
-                        "証明書検証失敗: {}",
-                        r.error.as_deref().unwrap_or("不明なエラー")
+                    p.fail(&i18n::cert_verify_failed_line(
+                        lang,
+                        r.error
+                            .as_deref()
+                            .unwrap_or(msg(lang, MsgKey::UnknownError)),
                     ));
                     if let Some(issuer) = &r.presented_issuer {
-                        if r.interception_suspected {
-                            p.warn(&format!(
-                                "提示された発行者: {issuer} (ミドルボックスの疑い)"
-                            ));
-                        } else {
-                            p.warn(&format!("提示された発行者: {issuer}"));
-                        }
+                        p.warn(&i18n::presented_issuer_line(
+                            lang,
+                            issuer,
+                            r.interception_suspected,
+                        ));
                     }
                 }
                 Some(r)
             }
             _ => {
-                p.fail("TCP 接続が確立できないため TLS 診断をスキップ");
+                p.fail(msg(lang, MsgKey::TlsSkippedNoTcp));
                 None
             }
         }
@@ -368,7 +351,7 @@ async fn main() {
 
     // ── ステージ5: HTTP ────────────────────────────
     let http_report = if target.do_http && tcp_any_ok {
-        p.section("HTTP");
+        p.section(MsgKey::StageHttp);
         let scheme = if target.use_tls { "https" } else { "http" };
         let host_for_url = if target.host.parse::<std::net::Ipv6Addr>().is_ok() {
             format!("[{}]", target.host)
@@ -381,7 +364,7 @@ async fn main() {
         } else {
             format!("{scheme}://{host_for_url}:{}{}", target.port, target.path)
         };
-        let mut r = probe::http::run(&url, timeout).await;
+        let mut r = probe::http::run(&url, timeout, lang).await;
         // 内訳時間は各ステージの実測値を転記する
         r.dns_ms = dns_report
             .sources
@@ -392,19 +375,19 @@ async fn main() {
         r.tls_ms = tls_report.as_ref().and_then(|t| t.handshake_ms);
 
         for hop in &r.redirect_chain {
-            p.ok(&format!("リダイレクト: {hop}"));
+            p.ok(&i18n::http_redirect_line(lang, hop));
         }
         match (r.status, &r.error) {
             (Some(status), None) => {
-                let line = format!(
-                    "GET {} → {} (DNS {} / 接続 {} / TLS {} / TTFB {} / 合計 {})",
-                    url,
+                let line = i18n::http_result_line(
+                    lang,
+                    &url,
                     status,
-                    fmt_ms(r.dns_ms),
-                    fmt_ms(r.connect_ms),
-                    fmt_ms(r.tls_ms),
-                    fmt_ms(r.ttfb_ms),
-                    fmt_ms(r.total_ms)
+                    &fmt_ms(r.dns_ms),
+                    &fmt_ms(r.connect_ms),
+                    &fmt_ms(r.tls_ms),
+                    &fmt_ms(r.ttfb_ms),
+                    &fmt_ms(r.total_ms),
                 );
                 if (200..400).contains(&status) {
                     p.ok(&line);
@@ -414,18 +397,18 @@ async fn main() {
             }
             (status, Some(e)) => {
                 if let Some(s) = status {
-                    p.fail(&format!("GET {url} → {s} だがエラー: {e}"));
+                    p.fail(&i18n::http_status_with_error_line(lang, &url, s, e));
                 } else {
-                    p.fail(&format!("GET {url} 失敗: {e}"));
+                    p.fail(&i18n::http_failed_line(lang, &url, e));
                 }
             }
-            (None, None) => p.fail(&format!("GET {url}: 結果なし")),
+            (None, None) => p.fail(&i18n::http_no_result_line(lang, &url)),
         }
         Some(r)
     } else {
-        if target.do_http && !args.json {
-            p.section("HTTP");
-            p.fail("TCP 接続が確立できないため HTTP 診断をスキップ");
+        if target.do_http && !p.quiet {
+            p.section(MsgKey::StageHttp);
+            p.fail(msg(lang, MsgKey::HttpSkippedNoTcp));
         }
         None
     };
@@ -433,16 +416,16 @@ async fn main() {
     // ── ステージ6: 経路品質 ─────────────────────────
     let path_report = match primary_ip {
         Some(ip) if tcp_any_ok => {
-            p.section("経路品質");
+            p.section(MsgKey::StagePath);
             let r = probe::path::run(ip, target.port, samples, timeout).await;
-            let line = format!(
-                "{} 回プローブ: ロス {:.0}% / RTT min/avg/max {}/{}/{} / ジッタ {}",
+            let line = i18n::path_line(
+                lang,
                 r.sent,
                 r.loss_pct,
-                fmt_ms(r.min_ms),
-                fmt_ms(r.avg_ms),
-                fmt_ms(r.max_ms),
-                fmt_ms(r.jitter_ms)
+                &fmt_ms(r.min_ms),
+                &fmt_ms(r.avg_ms),
+                &fmt_ms(r.max_ms),
+                &fmt_ms(r.jitter_ms),
             );
             if r.loss_pct >= 10.0 || r.jitter_ms.is_some_and(|j| j > 50.0) {
                 p.warn(&line);
@@ -473,56 +456,252 @@ async fn main() {
     };
 
     let verdict = judge(&full_report);
+    (full_report, verdict)
+}
+
+/// 【判定】/【根拠】/【所見】/【次の一手】ブロックを表示する
+fn print_verdict_block(rendered: &RenderedVerdict, lang: Lang) {
+    println!();
+    let style = if rendered.culprit == Culprit::NoProblem {
+        owo_colors::Style::new().green().bold()
+    } else {
+        owo_colors::Style::new().red().bold()
+    };
+    let headline = format!(
+        "{}",
+        rendered
+            .headline
+            .if_supports_color(Stdout, |t| t.style(style))
+    );
+    println!(
+        "{} {}",
+        msg(lang, MsgKey::VerdictLabel).if_supports_color(Stdout, |t| t.bold()),
+        headline
+    );
+    println!(
+        "{}",
+        msg(lang, MsgKey::EvidenceLabel).if_supports_color(Stdout, |t| t.bold())
+    );
+    let bullet = msg(lang, MsgKey::Bullet);
+    for e in &rendered.evidence {
+        println!("  {bullet}{e}");
+    }
+    if !rendered.secondary.is_empty() {
+        println!(
+            "{}",
+            msg(lang, MsgKey::NotesLabel).if_supports_color(Stdout, |t| t.bold())
+        );
+        for s in &rendered.secondary {
+            println!("  {bullet}{}", s.if_supports_color(Stdout, |t| t.yellow()));
+        }
+    }
+    println!(
+        "{} {}",
+        msg(lang, MsgKey::NextStepLabel).if_supports_color(Stdout, |t| t.bold()),
+        rendered.next_step
+    );
+}
+
+/// --watch 用: 検出した問題ごとの統計
+struct ProblemStat {
+    culprit: Culprit,
+    headline: String,
+    count: u32,
+    first: String,
+    last: String,
+}
+
+/// --watch モード: 診断をループし、1 行タイムラインとサマリを出す
+async fn watch_loop(
+    target: &Target,
+    timeout: Duration,
+    samples: u32,
+    interval_secs: u64,
+    lang: Lang,
+) -> ! {
+    let interval = Duration::from_secs(interval_secs.max(1));
+    println!("{}", i18n::watch_start_line(lang, interval.as_secs()));
+
+    let quiet = Printer { quiet: true, lang };
+    let mut runs = 0u32;
+    let mut ok_runs = 0u32;
+    let mut prev_culprit: Option<Culprit> = None;
+    let mut problems: Vec<ProblemStat> = Vec::new();
+
+    loop {
+        let outcome = tokio::select! {
+            r = diagnose(target, timeout, samples, &quiet) => Some(r),
+            _ = tokio::signal::ctrl_c() => None,
+        };
+        let Some((report, verdict)) = outcome else {
+            break;
+        };
+        runs += 1;
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        let rendered = verdict.render(lang);
+
+        if verdict.culprit == Culprit::NoProblem {
+            ok_runs += 1;
+            let dns = fmt_ms(
+                report
+                    .dns
+                    .sources
+                    .iter()
+                    .find(|s| s.is_ok())
+                    .and_then(|s| s.latency_ms),
+            );
+            let tcp = fmt_ms(report.tcp.probes.iter().find_map(|pr| pr.avg_ms));
+            let ttfb = fmt_ms(report.http.as_ref().and_then(|h| h.ttfb_ms));
+            let loss = report
+                .path
+                .as_ref()
+                .map_or("-".to_string(), |p| format!("{:.0}%", p.loss_pct));
+            println!(
+                "{ts} {} {}",
+                "✓".if_supports_color(Stdout, |t| t.green()),
+                i18n::watch_ok_details(lang, &dns, &tcp, &ttfb, &loss)
+            );
+        } else {
+            println!(
+                "{ts} {} {}",
+                "✗".if_supports_color(Stdout, |t| t.red()),
+                rendered.headline.if_supports_color(Stdout, |t| t.red())
+            );
+            match problems.iter_mut().find(|s| s.culprit == verdict.culprit) {
+                Some(stat) => {
+                    stat.count += 1;
+                    stat.last = ts.clone();
+                }
+                None => problems.push(ProblemStat {
+                    culprit: verdict.culprit,
+                    headline: rendered.headline.clone(),
+                    count: 1,
+                    first: ts.clone(),
+                    last: ts.clone(),
+                }),
+            }
+        }
+
+        // 判定カテゴリが変わったらフルの判定ブロックを表示する
+        // (初回は問題がある場合のみ)
+        let changed = match prev_culprit {
+            Some(prev) => prev != verdict.culprit,
+            None => verdict.culprit != Culprit::NoProblem,
+        };
+        if changed {
+            print_verdict_block(&rendered, lang);
+            println!();
+        }
+        prev_culprit = Some(verdict.culprit);
+
+        let stop = tokio::select! {
+            _ = tokio::time::sleep(interval) => false,
+            _ = tokio::signal::ctrl_c() => true,
+        };
+        if stop {
+            break;
+        }
+    }
+
+    // ── サマリ ─────────────────────────────────────
+    println!(
+        "\n{} {}",
+        "──".if_supports_color(Stdout, |t| t.dimmed()),
+        msg(lang, MsgKey::WatchSummaryHeader).if_supports_color(Stdout, |t| t.bold())
+    );
+    let ok_pct = if runs > 0 {
+        ok_runs as f64 * 100.0 / runs as f64
+    } else {
+        0.0
+    };
+    println!("{}", i18n::watch_runs_line(lang, runs, ok_runs, ok_pct));
+    if !problems.is_empty() {
+        println!("{}", msg(lang, MsgKey::WatchProblemsHeader));
+        let bullet = msg(lang, MsgKey::Bullet);
+        for s in &problems {
+            println!(
+                "  {bullet}{}",
+                i18n::watch_problem_line(lang, &s.headline, s.count, &s.first, &s.last)
+            );
+        }
+    }
+
+    std::process::exit(if problems.is_empty() { 0 } else { 1 });
+}
+
+#[tokio::main]
+async fn main() {
+    // rustls の暗号プロバイダ (ring) をプロセス既定として登録
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    let args = Args::parse();
+    let lang = args.lang.unwrap_or_else(Lang::detect);
+
+    if args.no_color || !std::io::stdout().is_terminal() {
+        owo_colors::set_override(false);
+    }
+
+    let err_prefix = msg(lang, MsgKey::ErrorPrefix);
+
+    let target = match parse_target(&args.target) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{err_prefix}: {}", i18n::parse_error(lang, &e));
+            std::process::exit(2);
+        }
+    };
+
+    let timeout = Duration::from_secs(args.timeout.max(1));
+    let samples = args.samples.max(1);
+
+    if let Some(interval) = args.watch {
+        if args.json {
+            eprintln!("{err_prefix}: {}", msg(lang, MsgKey::JsonWatchConflict));
+            std::process::exit(2);
+        }
+        watch_loop(&target, timeout, samples, interval, lang).await;
+    }
+
+    let p = Printer {
+        quiet: args.json,
+        lang,
+    };
+
+    if !args.json {
+        let host_colored = format!("{}", target.host.if_supports_color(Stdout, |t| t.cyan()));
+        println!(
+            "{} {}",
+            "netblame:".if_supports_color(Stdout, |t| t.bold()),
+            i18n::diagnosing_line(lang, &host_colored, target.port)
+        );
+    }
+
+    let (full_report, verdict) = diagnose(&target, timeout, samples, &p).await;
+    let rendered = verdict.render(lang);
 
     if args.json {
         #[derive(serde::Serialize)]
         struct JsonOutput<'a> {
             report: &'a Report,
-            verdict: &'a verdict::Verdict,
+            verdict: &'a RenderedVerdict,
         }
         match serde_json::to_string_pretty(&JsonOutput {
             report: &full_report,
-            verdict: &verdict,
+            verdict: &rendered,
         }) {
             Ok(s) => println!("{s}"),
             Err(e) => {
-                eprintln!("エラー: JSON 出力に失敗: {e}");
+                eprintln!(
+                    "{err_prefix}: {}",
+                    i18n::json_serialize_failed(lang, &e.to_string())
+                );
                 std::process::exit(2);
             }
         }
     } else {
-        println!();
-        let style = if verdict.culprit == Culprit::NoProblem {
-            owo_colors::Style::new().green().bold()
-        } else {
-            owo_colors::Style::new().red().bold()
-        };
-        let headline = format!(
-            "{}",
-            verdict
-                .headline
-                .if_supports_color(Stdout, |t| t.style(style))
-        );
-        println!(
-            "{} {}",
-            "【判定】".if_supports_color(Stdout, |t| t.bold()),
-            headline
-        );
-        println!("{}", "【根拠】".if_supports_color(Stdout, |t| t.bold()));
-        for e in &verdict.evidence {
-            println!("  ・{e}");
-        }
-        if !verdict.secondary.is_empty() {
-            println!("{}", "【所見】".if_supports_color(Stdout, |t| t.bold()));
-            for s in &verdict.secondary {
-                println!("  ・{}", s.if_supports_color(Stdout, |t| t.yellow()));
-            }
-        }
-        println!(
-            "{} {}",
-            "【次の一手】".if_supports_color(Stdout, |t| t.bold()),
-            verdict.next_step
-        );
+        print_verdict_block(&rendered, lang);
     }
 
     std::process::exit(if verdict.culprit == Culprit::NoProblem {
@@ -579,6 +758,9 @@ mod tests {
 
     #[test]
     fn parse_bad_scheme() {
-        assert!(parse_target("ftp://example.com").is_err());
+        assert!(matches!(
+            parse_target("ftp://example.com"),
+            Err(ParseError::UnsupportedScheme(_))
+        ));
     }
 }

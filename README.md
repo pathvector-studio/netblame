@@ -9,11 +9,12 @@ English | [日本語](README.ja.md)
 ```
 $ netblame https://example.com
 ...
-【判定】 問題は見つかりませんでした。少なくとも今、この宛先への経路は健全です
-(Verdict: No problem found. The path to this destination is healthy right now.)
+[VERDICT] No problem found. The path to this destination is healthy right now
 ```
 
-> ⚠️ **Prototype.** Verdict thresholds are heuristics and may misjudge unusual network setups — feedback welcome. Verified on Linux (macOS best-effort, Windows not yet supported). **Output messages are currently Japanese**; English output is on the roadmap.
+Output is available in English and Japanese (`--lang en|ja`, auto-detected from your locale).
+
+> ⚠️ **Prototype.** Verdict thresholds are heuristics and may misjudge unusual network setups — feedback welcome. Verified on Linux (macOS best-effort, Windows not yet supported).
 
 ## Install
 
@@ -49,6 +50,8 @@ netblame <target> [flags]
 | `--timeout <secs>` | Per-probe timeout | 5 |
 | `--samples <n>` | Number of latency samples | 5 |
 | `--no-color` | Disable colored output | - |
+| `--lang <en\|ja>` | Output language | auto-detect from locale |
+| `--watch [<secs>]` | Repeat the diagnosis on an interval, print a timestamped timeline; Ctrl-C shows a summary | 30 |
 
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error
 
@@ -91,12 +94,26 @@ cargo clippy         # zero warnings
 cargo build --release
 ```
 
+## Watch mode
+
+Intermittent problems are the worst to diagnose — `--watch` keeps re-running the diagnosis and shows when things break:
+
+```
+$ netblame --watch 30 https://example.com
+watching every 30s — press Ctrl-C to stop and show a summary
+10:12:42 ✓ OK (dns 1ms / tcp 16ms / ttfb 83ms / loss 0%)
+10:13:12 ✗ [VERDICT] Local DNS is not responding while public DNS works
+...
+── Watch summary
+runs: 42 / ok: 40 (95%)
+```
+
 ## Roadmap
 
+See [ROADMAP.md](ROADMAP.md).
+
 - **traceroute / MTU probing** — localize the fault (home vs ISP vs far side), detect PMTUD black holes (the classic VPN failure); needs CAP_NET_RAW handling
-- **English output** (`--lang en`)
 - **QUIC/HTTP3** — detect the "UDP 443 blocked, only HTTP/3 broken" class of failures
-- **Watch mode** — `netblame --watch` to catch intermittent problems with a timestamped timeline
 - **Report-sharing service** — one command to upload a `--json` report and get a short URL you can hand to your IT desk or ISP support
 
 ## License

@@ -3,6 +3,7 @@
 //! 「無検証 (診断専用・読み取りのみ)」で再接続して提示された証明書を調べる。
 //! 発行者名にミドルボックス製品の痕跡があれば TLS 傍受の疑いを立てる。
 
+use crate::i18n::{self, Lang};
 use crate::report::TlsReport;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -121,6 +122,7 @@ async fn handshake(
     addr: SocketAddr,
     timeout: Duration,
     verify: bool,
+    lang: Lang,
 ) -> Result<HandshakeOutcome, String> {
     let config = if verify {
         let mut roots = RootCertStore::empty();
@@ -140,13 +142,13 @@ async fn handshake(
 
     let tcp = tokio::time::timeout(timeout, TcpStream::connect(addr))
         .await
-        .map_err(|_| "TCP 接続タイムアウト".to_string())?
-        .map_err(|e| format!("TCP 接続失敗: {e}"))?;
+        .map_err(|_| i18n::probe_tcp_connect_timeout(lang))?
+        .map_err(|e| i18n::probe_tcp_connect_failed(lang, &e.to_string()))?;
 
     let start = Instant::now();
     let stream = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
         .await
-        .map_err(|_| "TLS ハンドシェイクタイムアウト".to_string())?
+        .map_err(|_| i18n::probe_tls_handshake_timeout(lang))?
         .map_err(|e| e.to_string())?;
     let handshake_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -166,11 +168,11 @@ async fn handshake(
 }
 
 /// TLS ステージを実行する
-pub async fn run(host: &str, ip: IpAddr, port: u16, timeout: Duration) -> TlsReport {
+pub async fn run(host: &str, ip: IpAddr, port: u16, timeout: Duration, lang: Lang) -> TlsReport {
     let addr = SocketAddr::new(ip, port);
     let mut report = TlsReport::default();
 
-    match handshake(host, addr, timeout, true).await {
+    match handshake(host, addr, timeout, true, lang).await {
         Ok(out) => {
             report.verified = true;
             report.hostname_matches = Some(true);
@@ -195,7 +197,7 @@ pub async fn run(host: &str, ip: IpAddr, port: u16, timeout: Duration) -> TlsRep
             }
 
             // 提示された証明書を調べるため、無検証 (診断専用) で再接続する
-            if let Ok(out) = handshake(host, addr, timeout, false).await {
+            if let Ok(out) = handshake(host, addr, timeout, false, lang).await {
                 report.version = out.version;
                 report.handshake_ms = Some(out.handshake_ms);
                 if let Some(der) = out.first_cert {

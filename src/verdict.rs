@@ -1,6 +1,10 @@
 //! 判定エンジン。`judge` は Report を受け取り、最も可能性の高い犯人を
 //! 1つ選んで根拠と次の一手を返す純粋関数 (I/O なし、ユニットテスト可能)。
+//!
+//! `judge` はロケール非依存の構造化データ (犯人カテゴリ + 根拠 enum) を返し、
+//! 文字列化は `Verdict::render` + `i18n` が言語ごとに行う。
 
+use crate::i18n::{self, Lang};
 use crate::report::{DnsOutcome, Report, TcpOutcome};
 use serde::Serialize;
 
@@ -37,30 +41,162 @@ pub enum Culprit {
     NoProblem,
 }
 
-/// 判定結果
-#[derive(Debug, Clone, Serialize)]
+impl Culprit {
+    /// ロケール非依存の機械可読コード
+    pub fn code(self) -> &'static str {
+        match self {
+            Culprit::LocalDnsBroken => "local_dns_broken",
+            Culprit::LocalDnsSlow => "local_dns_slow",
+            Culprit::DnsAnswerMismatch => "dns_answer_mismatch",
+            Culprit::NameDoesNotExist => "name_does_not_exist",
+            Culprit::TcpBlocked => "tcp_blocked",
+            Culprit::Ipv6Broken => "ipv6_broken",
+            Culprit::TlsCertExpired => "tls_cert_expired",
+            Culprit::TlsCertInvalid => "tls_cert_invalid",
+            Culprit::TlsIntercepted => "tls_intercepted",
+            Culprit::ProxyInterference => "proxy_interference",
+            Culprit::UnstablePath => "unstable_path",
+            Culprit::ServerSlow => "server_slow",
+            Culprit::ServerDown => "server_down",
+            Culprit::NoProblem => "no_problem",
+        }
+    }
+}
+
+/// 【判定】1行に必要なデータ。犯人カテゴリ + パラメータ。
+/// (TcpBlocked は「外向き全滅」と「特定ポートのみ」で文言が異なるため分離)
+#[derive(Debug, Clone, PartialEq)]
+pub enum Headline {
+    NameDoesNotExist { host: String },
+    LocalDnsBroken,
+    LocalDnsSlow,
+    OutboundDead,
+    DnsAnswerMismatch,
+    ServerDown { port: u16 },
+    TcpBlocked { port: u16 },
+    Ipv6Broken,
+    TlsCertExpired,
+    TlsIntercepted,
+    TlsCertInvalid,
+    ProxyInterference,
+    ServerSlow,
+    UnstablePath,
+    NoProblem,
+}
+
+/// 【根拠】1項目。ロケール非依存の構造化データ。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Evidence {
+    AllSourcesNxDomain,
+    PublicDnsAgrees,
+    PublicDnsResolves,
+    LocalDnsSourceFailed { label: String, outcome: DnsOutcome },
+    AllDnsUnresponsive,
+    OutboundBlockedSuspected,
+    LocalDnsAnswers { ips: Vec<String> },
+    PublicDnsAnswers { ips: Vec<String> },
+    SplitHorizonSuspected,
+    AllConnectionsRefused,
+    HostReachable,
+    DnsOkTcpTimedOut,
+    FirewallOrDeadPath,
+    Ipv6ConnectFailed { count: usize },
+    Ipv4Works,
+    CertExpiredDaysAgo { days: i64 },
+    TcpFineSoPathOk,
+    PresentedIssuer { issuer: String },
+    MiddleboxIssuer,
+    ChainVerifyFailed { error: String },
+    HostnameMismatch,
+    ProxyVarsDetected { vars: Vec<String> },
+    TcpOkHttpFailed,
+    HttpErrorDetail { error: String },
+    ConnectFast { ms: f64 },
+    TtfbSlow { ms: f64 },
+    ServerSideProcessing,
+    ProbeLoss { sent: u32, lost: u32, pct: f64 },
+    RttStats { avg: f64, jitter: f64 },
+    UnstablePathSymptom,
+    LocalDnsLatency { ms: f64 },
+    PublicDnsLatency { ms: f64 },
+    LatencyAddedEveryPage,
+    DnsHealthy,
+    TcpHealthy { ms: f64 },
+    TlsHealthy { version: String, days: i64 },
+    HttpHealthy { status: u16, ttfb: f64 },
+    PathHealthy { loss_pct: f64, jitter: f64 },
+    AllStagesOk,
+}
+
+/// 【所見】(副次的な発見) 1項目。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Finding {
+    HostsOverride {
+        host: String,
+        ip: String,
+    },
+    ProxyEnvPresent {
+        names: Vec<String>,
+    },
+    DnsAnswersDiffer {
+        local: Vec<String>,
+        public: Vec<String>,
+    },
+    CertExpiresSoon {
+        days: i64,
+    },
+}
+
+/// 判定結果 (構造化データ)。文字列化は `render` で行う。
+#[derive(Debug, Clone)]
 pub struct Verdict {
     pub culprit: Culprit,
-    /// 【判定】一行の犯人ステートメント
-    pub headline: String,
-    /// 【根拠】
-    pub evidence: Vec<String>,
-    /// 【次の一手】
-    pub next_step: String,
-    /// 副次的な所見
-    pub secondary: Vec<String>,
+    pub headline: Headline,
+    pub evidence: Vec<Evidence>,
+    pub secondary: Vec<Finding>,
 }
 
 impl Verdict {
-    fn new(culprit: Culprit, headline: &str, evidence: Vec<String>, next_step: &str) -> Self {
+    fn new(culprit: Culprit, headline: Headline, evidence: Vec<Evidence>) -> Self {
         Self {
             culprit,
-            headline: headline.to_string(),
+            headline,
             evidence,
-            next_step: next_step.to_string(),
             secondary: Vec::new(),
         }
     }
+
+    /// 指定言語で文字列化する。JSON 出力にもそのまま使う。
+    pub fn render(&self, lang: Lang) -> RenderedVerdict {
+        RenderedVerdict {
+            culprit: self.culprit,
+            culprit_code: self.culprit.code(),
+            headline: i18n::headline(lang, &self.headline),
+            evidence: self
+                .evidence
+                .iter()
+                .map(|e| i18n::evidence_line(lang, e))
+                .collect(),
+            next_step: i18n::next_step(lang, &self.headline).to_string(),
+            secondary: self
+                .secondary
+                .iter()
+                .map(|f| i18n::finding_line(lang, f))
+                .collect(),
+        }
+    }
+}
+
+/// 言語を選んで文字列化した判定結果 (表示・JSON 用)
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderedVerdict {
+    pub culprit: Culprit,
+    /// ロケール非依存の機械可読コード (例: "no_problem")
+    pub culprit_code: &'static str,
+    pub headline: String,
+    pub evidence: Vec<String>,
+    pub next_step: String,
+    pub secondary: Vec<String>,
 }
 
 const SLOW_LOCAL_DNS_MS: f64 = 200.0;
@@ -100,7 +236,7 @@ struct DnsView {
     local_best_ms: Option<f64>,
     /// パブリック系の最速レイテンシ
     public_best_ms: Option<f64>,
-    local_fail_labels: Vec<String>,
+    local_failures: Vec<(String, DnsOutcome)>,
     local_ips: Vec<String>,
     public_ips: Vec<String>,
 }
@@ -149,10 +285,10 @@ impl DnsView {
         let local_best_ms = best(&|s| s.is_local());
         let public_best_ms = best(&|s| s.is_public());
 
-        let local_fail_labels = srcs
+        let local_failures = srcs
             .iter()
             .filter(|s| s.is_local() && !s.is_ok())
-            .map(|s| format!("{} ({})", s.label, outcome_ja(&s.outcome)))
+            .map(|s| (s.label.clone(), s.outcome.clone()))
             .collect();
 
         Self {
@@ -164,7 +300,7 @@ impl DnsView {
             answers_disjoint,
             local_best_ms,
             public_best_ms,
-            local_fail_labels,
+            local_failures,
             local_ips,
             public_ips,
         }
@@ -214,16 +350,6 @@ impl TcpView {
     }
 }
 
-fn outcome_ja(o: &DnsOutcome) -> String {
-    match o {
-        DnsOutcome::Ok => "OK".into(),
-        DnsOutcome::NxDomain => "NXDOMAIN".into(),
-        DnsOutcome::ServFail => "SERVFAIL".into(),
-        DnsOutcome::Timeout => "タイムアウト".into(),
-        DnsOutcome::Error(e) => format!("エラー: {e}"),
-    }
-}
-
 fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     let host = &report.target.host;
 
@@ -231,39 +357,32 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     if d.ran && d.all_nxdomain {
         return Verdict::new(
             Culprit::NameDoesNotExist,
-            &format!("ドメイン「{host}」は存在しません。ネットワークのせいではありません"),
-            vec![
-                "問い合わせた全ての DNS サーバが NXDOMAIN (そんな名前は無い) と回答".into(),
-                "パブリック DNS (1.1.1.1 / 8.8.8.8) でも同じ回答".into(),
-            ],
-            "ホスト名のタイプミスを確認してください。正しいはずなら、ドメインの有効期限切れの可能性があります",
+            Headline::NameDoesNotExist { host: host.clone() },
+            vec![Evidence::AllSourcesNxDomain, Evidence::PublicDnsAgrees],
         );
     }
 
     // 2. ローカル DNS 死亡: パブリックは引けるのにローカルが引けない
     if d.ran && d.public_ok && !d.local_ok {
-        let mut ev = vec!["パブリック DNS (1.1.1.1 / 8.8.8.8) では名前解決に成功".into()];
-        for f in &d.local_fail_labels {
-            ev.push(format!("{f} は失敗"));
+        let mut ev = vec![Evidence::PublicDnsResolves];
+        for (label, outcome) in &d.local_failures {
+            ev.push(Evidence::LocalDnsSourceFailed {
+                label: label.clone(),
+                outcome: outcome.clone(),
+            });
         }
-        return Verdict::new(
-            Culprit::LocalDnsBroken,
-            "ローカル DNS リゾルバが機能していません",
-            ev,
-            "ルータの再起動、または DNS サーバを 1.1.1.1 / 8.8.8.8 に変更して回避できます",
-        );
+        return Verdict::new(Culprit::LocalDnsBroken, Headline::LocalDnsBroken, ev);
     }
 
     // 3. DNS 全滅 (NXDOMAIN ではなく、パブリックにも届かない) — 外向き通信自体が怪しい
     if d.ran && !d.any_ok && !d.all_nxdomain {
         return Verdict::new(
             Culprit::TcpBlocked,
-            "外向きの通信が全滅しています。ネットワーク接続自体に問題があります",
+            Headline::OutboundDead,
             vec![
-                "ローカル DNS もパブリック DNS (1.1.1.1 / 8.8.8.8) も応答しない".into(),
-                "名前解決以前に、外への UDP/TCP が通っていない可能性が高い".into(),
+                Evidence::AllDnsUnresponsive,
+                Evidence::OutboundBlockedSuspected,
             ],
-            "ケーブル/Wi-Fi 接続とルータの状態を確認してください。他のサイトも開けないはずです",
         );
     }
 
@@ -271,13 +390,16 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     if d.ran && d.answers_disjoint && (t.all_fail || tls_failed(report)) {
         return Verdict::new(
             Culprit::DnsAnswerMismatch,
-            "ローカル DNS とパブリック DNS で回答が異なり、接続にも失敗しています",
+            Headline::DnsAnswerMismatch,
             vec![
-                format!("ローカル側の回答: {}", d.local_ips.join(", ")),
-                format!("パブリック側の回答: {}", d.public_ips.join(", ")),
-                "スプリットホライズン DNS、フィルタリング、または DNS 書き換えの可能性".into(),
+                Evidence::LocalDnsAnswers {
+                    ips: d.local_ips.clone(),
+                },
+                Evidence::PublicDnsAnswers {
+                    ips: d.public_ips.clone(),
+                },
+                Evidence::SplitHorizonSuspected,
             ],
-            "社内ネットワークなら管理者に確認を。家庭ならルータの DNS 設定とセキュリティソフトを確認してください",
         );
     }
 
@@ -286,28 +408,18 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
         if t.all_refused {
             return Verdict::new(
                 Culprit::ServerDown,
-                &format!(
-                    "サーバは生きていますが、ポート {} で何も待ち受けていません",
-                    report.target.port
-                ),
-                vec![
-                    "全ての接続試行が RST (connection refused) で即座に拒否された".into(),
-                    "ホストまでは到達できている = ネットワーク経路は正常".into(),
-                ],
-                "ポート番号が正しいか確認してください。正しければサーバ側のサービス停止です",
+                Headline::ServerDown {
+                    port: report.target.port,
+                },
+                vec![Evidence::AllConnectionsRefused, Evidence::HostReachable],
             );
         }
         return Verdict::new(
             Culprit::TcpBlocked,
-            &format!(
-                "ポート {} への TCP 接続がタイムアウトします (フィルタ/到達不能)",
-                report.target.port
-            ),
-            vec![
-                "名前解決は成功しているが、TCP 接続が全ての IP でタイムアウト".into(),
-                "途中のファイアウォールで落とされているか、経路が死んでいる".into(),
-            ],
-            "別ネットワーク (スマホのテザリング等) から試して切り分けてください。そちらで繋がるなら今のネットワークのフィルタが原因です",
+            Headline::TcpBlocked {
+                port: report.target.port,
+            },
+            vec![Evidence::DnsOkTcpTimedOut, Evidence::FirewallOrDeadPath],
         );
     }
 
@@ -315,12 +427,11 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     if t.v6_total > 0 && t.v6_ok == 0 && t.v4_total > 0 && t.v4_ok > 0 {
         return Verdict::new(
             Culprit::Ipv6Broken,
-            "IPv6 経路が壊れています (IPv4 は正常)",
+            Headline::Ipv6Broken,
             vec![
-                format!("IPv6 アドレスへの TCP 接続が {} 件全て失敗", t.v6_total),
-                "IPv4 への接続は成功 — フォールバックで繋がるが、接続開始が遅くなる".into(),
+                Evidence::Ipv6ConnectFailed { count: t.v6_total },
+                Evidence::Ipv4Works,
             ],
-            "ルータ/回線の IPv6 設定を確認してください。応急処置として OS で IPv6 を無効化する手もあります",
         );
     }
 
@@ -330,43 +441,37 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
             let days = tls.days_until_expiry.map(|d| -d).unwrap_or(0);
             return Verdict::new(
                 Culprit::TlsCertExpired,
-                "サーバの TLS 証明書が期限切れです。ネットワークのせいではありません",
+                Headline::TlsCertExpired,
                 vec![
-                    format!("証明書は {days} 日前に失効"),
-                    "TCP 接続までは正常 = 経路は問題なし".into(),
+                    Evidence::CertExpiredDaysAgo { days },
+                    Evidence::TcpFineSoPathOk,
                 ],
-                "サーバ管理者に証明書の更新を依頼してください。自分のサイトなら証明書を更新してください",
             );
         }
         if tls.interception_suspected {
-            let issuer = tls.presented_issuer.as_deref().unwrap_or("不明");
+            let issuer = tls.presented_issuer.clone().unwrap_or_else(|| "?".into());
             return Verdict::new(
                 Culprit::TlsIntercepted,
-                "TLS 通信が途中で傍受されている可能性が高いです",
+                Headline::TlsIntercepted,
                 vec![
-                    format!("提示された証明書の発行者: {issuer}"),
-                    "本来の認証局ではなく、ミドルボックス (FW/プロキシ製品) 由来と思われる発行者".into(),
+                    Evidence::PresentedIssuer { issuer },
+                    Evidence::MiddleboxIssuer,
                 ],
-                "社内ネットワークなら SSL インスペクションが有効です。管理者に確認するか、社の CA 証明書を導入してください",
             );
         }
         if !tls.verified && tls.error.is_some() {
-            let mut ev = vec![format!(
-                "証明書チェーンの検証に失敗: {}",
-                tls.error.as_deref().unwrap_or("")
-            )];
+            let mut ev = vec![Evidence::ChainVerifyFailed {
+                error: tls.error.clone().unwrap_or_default(),
+            }];
             if let Some(issuer) = &tls.presented_issuer {
-                ev.push(format!("提示された証明書の発行者: {issuer}"));
+                ev.push(Evidence::PresentedIssuer {
+                    issuer: issuer.clone(),
+                });
             }
             if tls.hostname_matches == Some(false) {
-                ev.push("証明書のホスト名がターゲットと一致しない".into());
+                ev.push(Evidence::HostnameMismatch);
             }
-            return Verdict::new(
-                Culprit::TlsCertInvalid,
-                "サーバの TLS 証明書が不正です (チェーン検証失敗)",
-                ev,
-                "URL が正しいか確認してください。正しければサーバ側の証明書設定ミスの可能性が高いです",
-            );
+            return Verdict::new(Culprit::TlsCertInvalid, Headline::TlsCertInvalid, ev);
         }
     }
 
@@ -374,7 +479,7 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     if !report.env.proxies.is_empty() && t.any_ok {
         if let Some(http) = &report.http {
             if http.error.is_some() && http.status.is_none() {
-                let vars: Vec<_> = report
+                let vars: Vec<String> = report
                     .env
                     .proxies
                     .iter()
@@ -382,20 +487,14 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
                     .collect();
                 return Verdict::new(
                     Culprit::ProxyInterference,
-                    "プロキシ設定が通信を妨げている可能性が高いです",
+                    Headline::ProxyInterference,
                     vec![
-                        format!("プロキシ環境変数を検出: {}", vars.join(", ")),
-                        "TCP 直結は成功するのに、HTTP リクエストは失敗".into(),
-                        format!(
-                            "HTTP エラー: {}",
-                            report
-                                .http
-                                .as_ref()
-                                .and_then(|h| h.error.as_deref())
-                                .unwrap_or("")
-                        ),
+                        Evidence::ProxyVarsDetected { vars },
+                        Evidence::TcpOkHttpFailed,
+                        Evidence::HttpErrorDetail {
+                            error: http.error.clone().unwrap_or_default(),
+                        },
                     ],
-                    "unset http_proxy https_proxy で一時解除して再試行してください。直るならプロキシ設定が犯人です",
                 );
             }
         }
@@ -407,13 +506,12 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
             if ttfb > SLOW_TTFB_MS && connect < FAST_CONNECT_MS {
                 return Verdict::new(
                     Culprit::ServerSlow,
-                    "サーバ側の応答が遅いです。ネットワークは正常です",
+                    Headline::ServerSlow,
                     vec![
-                        format!("TCP 接続は {connect:.0}ms と高速 = 経路は健全"),
-                        format!("しかし最初の応答 (TTFB) まで {ttfb:.0}ms かかっている"),
-                        "遅いのはサーバの処理 (アプリ/DB) 側".into(),
+                        Evidence::ConnectFast { ms: connect },
+                        Evidence::TtfbSlow { ms: ttfb },
+                        Evidence::ServerSideProcessing,
                     ],
-                    "回線やルータをいじっても改善しません。サーバ管理者への連絡か、時間を置いての再試行を",
                 );
             }
         }
@@ -426,21 +524,17 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
         if lossy || jittery {
             let mut ev = Vec::new();
             if lossy {
-                ev.push(format!(
-                    "接続プローブ {} 回中 {} 回失敗 (ロス率 {:.0}%)",
-                    path.sent, path.lost, path.loss_pct
-                ));
+                ev.push(Evidence::ProbeLoss {
+                    sent: path.sent,
+                    lost: path.lost,
+                    pct: path.loss_pct,
+                });
             }
             if let (Some(avg), Some(j)) = (path.avg_ms, path.jitter_ms) {
-                ev.push(format!("RTT 平均 {avg:.0}ms / ジッタ {j:.0}ms"));
+                ev.push(Evidence::RttStats { avg, jitter: j });
             }
-            ev.push("経路が不安定 — 体感の「重い」「途切れる」の典型パターン".into());
-            return Verdict::new(
-                Culprit::UnstablePath,
-                "ネットワーク経路が不安定です (パケットロス/ジッタ大)",
-                ev,
-                "Wi-Fi なら有線接続か 5GHz 帯への変更を試してください。有線なら回線事業者側の問題の可能性があります",
-            );
+            ev.push(Evidence::UnstablePathSymptom);
+            return Verdict::new(Culprit::UnstablePath, Headline::UnstablePath, ev);
         }
     }
 
@@ -449,13 +543,12 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
         if local > SLOW_LOCAL_DNS_MS && public < FAST_PUBLIC_DNS_MS {
             return Verdict::new(
                 Culprit::LocalDnsSlow,
-                "ローカル DNS リゾルバが遅く、全体の体感を悪化させています",
+                Headline::LocalDnsSlow,
                 vec![
-                    format!("ローカル DNS の応答に {local:.0}ms"),
-                    format!("パブリック DNS (1.1.1.1 / 8.8.8.8) は {public:.0}ms と高速"),
-                    "ページを開くたびにこの差が上乗せされる".into(),
+                    Evidence::LocalDnsLatency { ms: local },
+                    Evidence::PublicDnsLatency { ms: public },
+                    Evidence::LatencyAddedEveryPage,
                 ],
-                "DNS サーバを 1.1.1.1 または 8.8.8.8 に変更すると改善が見込めます",
             );
         }
     }
@@ -463,46 +556,39 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
     // 12. 問題なし
     let mut ev = Vec::new();
     if d.ran && d.any_ok {
-        ev.push("名前解決: 正常".into());
+        ev.push(Evidence::DnsHealthy);
     }
     if t.ran && t.any_ok {
         if let Some(c) = t.best_connect_ms {
-            ev.push(format!("TCP 接続: 正常 ({c:.0}ms)"));
+            ev.push(Evidence::TcpHealthy { ms: c });
         }
     }
     if let Some(tls) = &report.tls {
         if tls.verified {
-            ev.push(format!(
-                "TLS: 正常 ({}, 証明書残り {} 日)",
-                tls.version.as_deref().unwrap_or("?"),
-                tls.days_until_expiry.unwrap_or(0)
-            ));
+            ev.push(Evidence::TlsHealthy {
+                version: tls.version.clone().unwrap_or_else(|| "?".into()),
+                days: tls.days_until_expiry.unwrap_or(0),
+            });
         }
     }
     if let Some(http) = &report.http {
         if let Some(status) = http.status {
-            ev.push(format!(
-                "HTTP: {status} (TTFB {:.0}ms)",
-                http.ttfb_ms.unwrap_or(0.0)
-            ));
+            ev.push(Evidence::HttpHealthy {
+                status,
+                ttfb: http.ttfb_ms.unwrap_or(0.0),
+            });
         }
     }
     if let Some(path) = &report.path {
-        ev.push(format!(
-            "経路品質: ロス {:.0}% / ジッタ {:.0}ms",
-            path.loss_pct,
-            path.jitter_ms.unwrap_or(0.0)
-        ));
+        ev.push(Evidence::PathHealthy {
+            loss_pct: path.loss_pct,
+            jitter: path.jitter_ms.unwrap_or(0.0),
+        });
     }
     if ev.is_empty() {
-        ev.push("実施した全ステージで異常なし".into());
+        ev.push(Evidence::AllStagesOk);
     }
-    Verdict::new(
-        Culprit::NoProblem,
-        "問題は見つかりませんでした。少なくとも今、この宛先への経路は健全です",
-        ev,
-        "問題が断続的なら、症状が出ている最中にもう一度実行してください",
-    )
+    Verdict::new(Culprit::NoProblem, Headline::NoProblem, ev)
 }
 
 fn tls_failed(report: &Report) -> bool {
@@ -513,36 +599,29 @@ fn tls_failed(report: &Report) -> bool {
 }
 
 /// 主判定に含まれない副次的所見を集める
-fn collect_secondary(report: &Report, d: &DnsView, t: &TcpView) -> Vec<String> {
+fn collect_secondary(report: &Report, d: &DnsView, t: &TcpView) -> Vec<Finding> {
     let mut s = Vec::new();
     if let Some(over) = &report.env.hosts_override {
-        s.push(format!(
-            "/etc/hosts に「{}」の上書きエントリあり ({over}) — DNS を無視して接続しています",
-            report.target.host
-        ));
+        s.push(Finding::HostsOverride {
+            host: report.target.host.clone(),
+            ip: over.clone(),
+        });
     }
     if !report.env.proxies.is_empty() {
-        let vars: Vec<_> = report.env.proxies.iter().map(|(k, _)| k.clone()).collect();
-        s.push(format!(
-            "プロキシ環境変数が設定されています: {}",
-            vars.join(", ")
-        ));
+        let names: Vec<_> = report.env.proxies.iter().map(|(k, _)| k.clone()).collect();
+        s.push(Finding::ProxyEnvPresent { names });
     }
     if d.answers_disjoint && !(t.all_fail || tls_failed(report)) {
-        s.push(format!(
-            "ローカル DNS とパブリック DNS で回答が異なります (ローカル: {} / パブリック: {}) — CDN なら正常なこともあります",
-            d.local_ips.join(", "),
-            d.public_ips.join(", ")
-        ));
-    }
-    if t.v6_total > 0 && t.v6_ok == 0 && t.v4_ok > 0 && t.all_fail {
-        // 全滅時は主判定側で扱う
+        s.push(Finding::DnsAnswersDiffer {
+            local: d.local_ips.clone(),
+            public: d.public_ips.clone(),
+        });
     }
     if let Some(tls) = &report.tls {
         if tls.verified {
             if let Some(days) = tls.days_until_expiry {
                 if (0..=14).contains(&days) {
-                    s.push(format!("TLS 証明書の残り有効期間が {days} 日と短い"));
+                    s.push(Finding::CertExpiresSoon { days });
                 }
             }
         }
@@ -780,7 +859,10 @@ mod tests {
         }
         let v = judge(&r);
         assert_eq!(v.culprit, Culprit::NoProblem);
-        assert!(v.secondary.iter().any(|s| s.contains("回答が異なります")));
+        assert!(v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::DnsAnswersDiffer { .. })));
     }
 
     #[test]
@@ -894,6 +976,88 @@ mod tests {
         r.env.hosts_override = Some("127.0.0.1".into());
         let v = judge(&r);
         assert_eq!(v.culprit, Culprit::NoProblem);
-        assert!(v.secondary.iter().any(|s| s.contains("/etc/hosts")));
+        assert!(v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::HostsOverride { .. })));
+    }
+
+    // ── レンダリング (言語別) ───────────────────────────────
+
+    #[test]
+    fn render_no_problem_en_and_ja() {
+        let v = judge(&base_report());
+        let en = v.render(Lang::En);
+        assert_eq!(en.culprit_code, "no_problem");
+        assert!(en.headline.contains("No problem found"));
+        assert!(en.headline.contains("healthy right now"));
+        assert!(en.next_step.contains("intermittent"));
+        assert!(en
+            .evidence
+            .iter()
+            .any(|e| e.contains("name resolution: OK")));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("問題は見つかりませんでした"));
+        assert!(ja.next_step.contains("もう一度実行"));
+        assert!(ja.evidence.iter().any(|e| e.contains("名前解決: 正常")));
+    }
+
+    #[test]
+    fn render_tcp_blocked_en_and_ja() {
+        let mut r = base_report();
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        let v = judge(&r);
+        let en = v.render(Lang::En);
+        assert!(en.headline.contains("port 443"));
+        assert!(en.headline.contains("time out"));
+        assert!(en.next_step.contains("another network"));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("ポート 443"));
+        assert!(ja.headline.contains("タイムアウト"));
+        assert!(ja.next_step.contains("テザリング"));
+    }
+
+    #[test]
+    fn render_tls_cert_expired_en_and_ja() {
+        let mut r = base_report();
+        let tls = r.tls.as_mut().unwrap();
+        tls.verified = false;
+        tls.cert_expired = true;
+        tls.days_until_expiry = Some(-30);
+        tls.error = Some("certificate expired".into());
+        r.http = None;
+        let v = judge(&r);
+        let en = v.render(Lang::En);
+        assert!(en.headline.contains("certificate has expired"));
+        assert!(en.headline.contains("not a network problem"));
+        assert!(en
+            .evidence
+            .iter()
+            .any(|e| e.contains("expired 30 days ago")));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("証明書が期限切れ"));
+        assert!(ja.evidence.iter().any(|e| e.contains("30 日前に失効")));
+    }
+
+    #[test]
+    fn render_name_does_not_exist_en_and_ja() {
+        let mut r = base_report();
+        for s in &mut r.dns.sources {
+            s.outcome = DnsOutcome::NxDomain;
+            s.ips.clear();
+        }
+        r.tcp.probes.clear();
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        let v = judge(&r);
+        let en = v.render(Lang::En);
+        assert!(en.headline.contains("\"example.com\" does not exist"));
+        assert!(en.evidence.iter().any(|e| e.contains("NXDOMAIN")));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("「example.com」は存在しません"));
     }
 }

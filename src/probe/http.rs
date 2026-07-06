@@ -3,13 +3,14 @@
 //! チェーン (最大5ホップ)・TTFB・合計時間を計測する。
 //! DNS / TCP / TLS の内訳時間は各ステージの実測値を main 側で埋める。
 
+use crate::i18n::{self, Lang};
 use crate::report::HttpReport;
 use std::time::{Duration, Instant};
 
 const MAX_REDIRECTS: usize = 5;
 
 /// HTTP ステージを実行する
-pub async fn run(url: &str, timeout: Duration) -> HttpReport {
+pub async fn run(url: &str, timeout: Duration, lang: Lang) -> HttpReport {
     let mut report = HttpReport::default();
 
     let client = match reqwest::Client::builder()
@@ -21,7 +22,7 @@ pub async fn run(url: &str, timeout: Duration) -> HttpReport {
     {
         Ok(c) => c,
         Err(e) => {
-            report.error = Some(format!("HTTP クライアント初期化失敗: {e}"));
+            report.error = Some(i18n::probe_http_client_init_failed(lang, &e.to_string()));
             return report;
         }
     };
@@ -46,7 +47,7 @@ pub async fn run(url: &str, timeout: Duration) -> HttpReport {
         if status.is_redirection() {
             if hop == MAX_REDIRECTS {
                 report.status = Some(status.as_u16());
-                report.error = Some(format!("リダイレクトが {MAX_REDIRECTS} 回を超過"));
+                report.error = Some(i18n::probe_too_many_redirects(lang, MAX_REDIRECTS));
                 report.total_ms = Some(total_start.elapsed().as_secs_f64() * 1000.0);
                 return report;
             }
@@ -73,7 +74,7 @@ pub async fn run(url: &str, timeout: Duration) -> HttpReport {
                 }
                 None => {
                     report.status = Some(status.as_u16());
-                    report.error = Some("リダイレクト応答に Location ヘッダがない".into());
+                    report.error = Some(i18n::probe_no_location_header(lang));
                     report.total_ms = Some(total_start.elapsed().as_secs_f64() * 1000.0);
                     return report;
                 }
@@ -86,7 +87,7 @@ pub async fn run(url: &str, timeout: Duration) -> HttpReport {
         match resp.bytes().await {
             Ok(_) => {}
             Err(e) => {
-                report.error = Some(format!("ボディ受信失敗: {e}"));
+                report.error = Some(i18n::probe_body_read_failed(lang, &e.to_string()));
             }
         }
         report.total_ms = Some(total_start.elapsed().as_secs_f64() * 1000.0);

@@ -2,6 +2,7 @@
 //! ホスト名を4系統 (システム / resolv.conf の各ネームサーバ / 1.1.1.1 / 8.8.8.8)
 //! で解決し、回答・結果コード・レイテンシを比較する。
 
+use crate::i18n::{self, Lang};
 use crate::report::{DnsOutcome, DnsReport, DnsSource, DnsSourceResult};
 use hickory_resolver::config::{LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -15,7 +16,7 @@ const CLOUDFLARE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1));
 const GOOGLE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
 
 /// システムリゾルバ (getaddrinfo 相当) での解決
-async fn query_system(host: &str, timeout: Duration) -> DnsSourceResult {
+async fn query_system(host: &str, timeout: Duration, lang: Lang) -> DnsSourceResult {
     let host_owned = host.to_string();
     let start = Instant::now();
     let joined = tokio::time::timeout(
@@ -59,7 +60,7 @@ async fn query_system(host: &str, timeout: Duration) -> DnsSourceResult {
 
     DnsSourceResult {
         source: DnsSource::System,
-        label: "システムリゾルバ".to_string(),
+        label: i18n::label_system_resolver(lang),
         outcome,
         ips,
         latency_ms,
@@ -73,6 +74,7 @@ async fn query_direct(
     source: DnsSource,
     label: String,
     timeout: Duration,
+    lang: Lang,
 ) -> DnsSourceResult {
     let mut config =
         ResolverConfig::from_parts(None, Vec::new(), vec![NameServerConfig::udp_and_tcp(ns)]);
@@ -95,7 +97,7 @@ async fn query_direct(
             return DnsSourceResult {
                 source,
                 label,
-                outcome: DnsOutcome::Error(format!("リゾルバ初期化失敗: {e}")),
+                outcome: DnsOutcome::Error(i18n::probe_resolver_init_failed(lang, &e.to_string())),
                 ips: Vec::new(),
                 latency_ms: None,
             }
@@ -126,7 +128,7 @@ async fn query_direct(
             ips.dedup();
             (DnsOutcome::Ok, ips, Some(latency))
         }
-        Ok(Err(e)) => (classify_error(&e), Vec::new(), Some(latency)),
+        Ok(Err(e)) => (classify_error(&e, lang), Vec::new(), Some(latency)),
     };
 
     DnsSourceResult {
@@ -138,21 +140,24 @@ async fn query_direct(
     }
 }
 
-fn classify_error(e: &NetError) -> DnsOutcome {
+fn classify_error(e: &NetError, lang: Lang) -> DnsOutcome {
     match e {
         NetError::Timeout => DnsOutcome::Timeout,
         NetError::Dns(DnsError::NoRecordsFound(no_records)) => {
             if no_records.response_code == ResponseCode::NXDomain {
                 DnsOutcome::NxDomain
             } else {
-                DnsOutcome::Error(format!("レコードなし ({})", no_records.response_code))
+                DnsOutcome::Error(i18n::probe_no_records(
+                    lang,
+                    &no_records.response_code.to_string(),
+                ))
             }
         }
         NetError::Dns(DnsError::ResponseCode(code)) => {
             if *code == ResponseCode::ServFail {
                 DnsOutcome::ServFail
             } else {
-                DnsOutcome::Error(format!("応答コード {code}"))
+                DnsOutcome::Error(i18n::probe_response_code(lang, &code.to_string()))
             }
         }
         other => DnsOutcome::Error(other.to_string()),
@@ -160,7 +165,12 @@ fn classify_error(e: &NetError) -> DnsOutcome {
 }
 
 /// DNS ステージを実行する
-pub async fn run(host: &str, local_nameservers: &[IpAddr], timeout: Duration) -> DnsReport {
+pub async fn run(
+    host: &str,
+    local_nameservers: &[IpAddr],
+    timeout: Duration,
+    lang: Lang,
+) -> DnsReport {
     // IP リテラルなら DNS は不要
     if host.parse::<IpAddr>().is_ok() {
         return DnsReport {
@@ -172,7 +182,7 @@ pub async fn run(host: &str, local_nameservers: &[IpAddr], timeout: Duration) ->
     let mut sources = Vec::new();
 
     // (a) システムリゾルバ
-    sources.push(query_system(host, timeout).await);
+    sources.push(query_system(host, timeout, lang).await);
 
     // (b) resolv.conf の各ネームサーバ (パブリック DNS と重複していても実測する)
     for &ns in local_nameservers.iter().take(3) {
@@ -181,8 +191,9 @@ pub async fn run(host: &str, local_nameservers: &[IpAddr], timeout: Duration) ->
                 host,
                 ns,
                 DnsSource::Local(ns),
-                format!("ローカル {ns}"),
+                i18n::label_local_ns(lang, &ns),
                 timeout,
+                lang,
             )
             .await,
         );
@@ -193,8 +204,17 @@ pub async fn run(host: &str, local_nameservers: &[IpAddr], timeout: Duration) ->
         (CLOUDFLARE, "1.1.1.1 (Cloudflare)"),
         (GOOGLE, "8.8.8.8 (Google)"),
     ] {
-        sources
-            .push(query_direct(host, ns, DnsSource::Public(ns), name.to_string(), timeout).await);
+        sources.push(
+            query_direct(
+                host,
+                ns,
+                DnsSource::Public(ns),
+                name.to_string(),
+                timeout,
+                lang,
+            )
+            .await,
+        );
     }
 
     DnsReport {
