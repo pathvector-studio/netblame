@@ -177,6 +177,64 @@ pub struct PathReport {
     pub jitter_ms: Option<f64>,
 }
 
+/// ステージ7: 経路トレースの 1 ホップぶんの結果
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceHop {
+    /// TTL (1 始まり)
+    pub index: u8,
+    /// 応答したルータのアドレス (無応答なら None)
+    pub addr: Option<IpAddr>,
+    pub rtt_ms: Option<f64>,
+}
+
+/// DF ビット付き MTU プローブ 1 発の結果分類
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "code", content = "detail")]
+pub enum MtuProbeOutcome {
+    /// 送信できたが、ICMP も宛先応答も返ってこなかった
+    Silent,
+    /// ICMP fragmentation-needed / packet-too-big を受信 (経路上の MTU ヒント付き)
+    FragNeeded { mtu: Option<u32> },
+    /// 宛先まで届いた (port-unreachable が返った = このサイズは経路を通る)
+    Delivered,
+    /// 送信自体が失敗 (EMSGSIZE 等 = ローカル側の MTU 超過)
+    LocalError,
+}
+
+/// DF ビット付き MTU プローブ 1 発 (パケットサイズと結果)
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MtuProbe {
+    /// IP パケット全体のサイズ (バイト)
+    pub size: u16,
+    pub outcome: MtuProbeOutcome,
+}
+
+/// ステージ7: 経路トレース + PMTU 検出の計測データ
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TraceData {
+    pub hops: Vec<TraceHop>,
+    /// 宛先自体からの応答 (port-unreachable) を確認できたか
+    pub dest_reached: bool,
+    /// カーネルが把握している経路 MTU (getsockopt IP_MTU)
+    pub kernel_mtu: Option<u16>,
+    pub mtu_probes: Vec<MtuProbe>,
+}
+
+/// ステージ7 の結果。Linux 以外では Unsupported。
+/// (どの variant が構築されるかはプラットフォーム依存だが、
+/// 表示コードは常に全 variant を扱うため dead_code を許可する)
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", content = "data")]
+#[allow(dead_code)]
+pub enum TraceReport {
+    /// トレースを実行した (ホップ 0 件でも Ran)
+    Ran(TraceData),
+    /// このプラットフォームでは非対応 (tracepath 方式は Linux のみ)
+    Unsupported,
+    /// 実行したが失敗した (サンドボックス等)
+    Failed(String),
+}
+
 /// 全ステージの結果を束ねた診断レポート
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -187,4 +245,5 @@ pub struct Report {
     pub tls: Option<TlsReport>,
     pub http: Option<HttpReport>,
     pub path: Option<PathReport>,
+    pub trace: Option<TraceReport>,
 }

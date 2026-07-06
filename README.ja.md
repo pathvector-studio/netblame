@@ -50,6 +50,9 @@ netblame <target> [flags]
 | `--no-color` | 色つき出力を無効化 | - |
 | `--lang <en\|ja>` | 出力言語 | ロケールから自動判定 |
 | `--watch [<秒>]` | 診断を繰り返しタイムライン表示。Ctrl-C でサマリー | 30 |
+| `--trace` | ホップ単位の経路トレースを常に実行 (下記参照) | 自動 |
+
+**経路トレースの自動起動**: `--trace` を付けなくても、前段のステージで経路系の問題 (TCP タイムアウト / パケットロス > 0% / ジッタ大) が見つかったときだけ自動で実行されます。最悪 15〜30 秒ほどかかるため、健全時はスキップされます。トレースは tracepath 方式 (UDP + `IP_RECVERR`) で **root 権限不要**、ただし **Linux のみ対応**です (他 OS ではその旨を表示してスキップ)。
 
 **終了コード**: `0` = 問題なし / `1` = 問題を検出 / `2` = 使い方・内部エラー
 
@@ -129,12 +132,26 @@ $ netblame example.com:81 --timeout 2
   ✗ IPv6 2606:4700:10::6814:179a:81 タイムアウト (フィルタ/到達不能)
   ✗ IPv4 172.66.147.243:81 タイムアウト (フィルタ/到達不能)
 
+── 経路トレース
+   1  192.168.40.1  2ms
+   2  *  (応答なし)
+   3  10.202.122.116  22ms
+   4  10.84.8.19  14ms
+   ...
+  10  103.22.201.21  28ms
+  11  104.20.23.154  14ms
+  ✓ 宛先に到達 (11 ホップ)
+  ✓ 経路 MTU: 1500
+
 【判定】 ポート 81 への TCP 接続がタイムアウトします (フィルタ/到達不能)
 【根拠】
   ・名前解決は成功しているが、TCP 接続が全ての IP でタイムアウト
   ・途中のファイアウォールで落とされているか、経路が死んでいる
+  ・最後に応答したホップ: 104.20.23.154 (ホップ 11 / 推定経路長 ~11)
 【次の一手】 別ネットワーク (スマホのテザリング等) から試して切り分けてください。そちらで繋がるなら今のネットワークのフィルタが原因です
 ```
+
+TCP タイムアウト検出により経路トレースが自動起動しています。トレースが途中のホップで止まる場合は、止まった位置に応じて「宅内 (ホップ 1-2) / ISP 網内 (序盤) / 対岸 (奥)」の切り分けガイダンスが【次の一手】に追記されます。
 
 ### 期限切れ証明書
 
@@ -164,12 +181,13 @@ $ netblame https://expired.badssl.com --samples 2
 4. **TLS** (`tls.rs`) — rustls + webpki-roots で検証つきハンドシェイク。TLS バージョン・証明書の残り有効日数・ホスト名一致を記録。検証失敗時は**無検証 (読み取り専用・診断目的のみ)** で再接続して提示された証明書の発行者を取得し、Zscaler / FortiGate 等のミドルボックス痕跡があれば TLS 傍受の疑いを立てる
 5. **HTTP** (`http.rs`) — reqwest (rustls バックエンド) で GET。ステータス・リダイレクトチェーン (最大 5)・TTFB・合計時間を計測し、DNS/接続/TLS の内訳は各ステージの実測値を転記
 6. **経路品質** (`path.rs`) — 主要 IP へ TCP connect ping を N 回打ち、ロス率・平均 RTT・ジッタ (標準偏差) を算出
+7. **経路トレース** (`trace.rs`, Linux のみ・root 不要) — tracepath 方式の traceroute。非特権 UDP ソケットに `IP_RECVERR` を設定し、`MSG_ERRQUEUE` 経由で ICMP time-exceeded / port-unreachable を受信してホップごとのルータアドレスと RTT を記録 (TTL 1〜30、各 2 プローブ・1 秒タイムアウト)。さらに `IP_PMTUDISC_PROBE` で DF ビット付きデータグラム (1500→1024 バイト) を送り、経路 MTU と「超過パケットが ICMP 通知なしで消えるか」(PMTUD ブラックホールの兆候) を観測
 
 ### 判定エンジン (src/verdict.rs)
 
-`fn judge(report: &Report) -> Verdict` は **I/O を持たない純粋関数**で、証拠から犯人カテゴリを 1 つ選びます (ユニットテスト 16 件で検証)。
+`fn judge(report: &Report) -> Verdict` は **I/O を持たない純粋関数**で、証拠から犯人カテゴリを 1 つ選びます (ユニットテストで検証)。
 
-犯人カテゴリ: `LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `ServerSlow` / `ServerDown` / `NoProblem`
+犯人カテゴリ: `LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `ServerSlow` / `ServerDown` / `NoProblem`
 
 判定の考え方 (優先度順):
 
@@ -182,6 +200,8 @@ $ netblame https://expired.badssl.com --samples 2
 - プロキシ設定あり + TCP 直結は成功なのに HTTP 失敗 → プロキシ干渉
 - 接続は速い (<100ms) のに TTFB が遅い (>1000ms) → **サーバが遅い。ネットワークは正常**
 - ロス ≥10% またはジッタ >50ms → 経路不安定
+- TCP は通るのに、経路 MTU が 1500 未満 **かつ** 超過 DF プローブが ICMP 通知なしで消える → **`PmtuBlackhole`** — 小さい通信は通るのに大きい転送だけ止まる VPN/トンネルの典型事故。次の一手は トンネル MTU の確認 / MSS clamp
+- 経路系の判定 (`TcpBlocked` / `ServerDown` / `UnstablePath`) でホップ情報がある場合、根拠に「最後に応答したホップ: <ip> (ホップ N / 推定経路長 ~M)」を追加し、止まった位置に応じて宅内 (ホップ 1-2) / ISP 網内 (序盤) / 対岸 (奥) の切り分けガイダンスを【次の一手】に追記
 - ローカル DNS >200ms でパブリック <100ms → ローカル DNS が遅い
 
 主犯にならなかった所見 (hosts 上書き、プロキシ検出、CDN による回答差、証明書の残日数僅少) は【所見】として併記します。
@@ -189,7 +209,7 @@ $ netblame https://expired.badssl.com --samples 2
 ## 開発
 
 ```bash
-cargo test           # 判定エンジン + パーサのユニットテスト (28 件)
+cargo test           # 判定エンジン + トレース解析 + パーサのユニットテスト (50 件)
 cargo clippy         # 警告ゼロ
 cargo build --release
 ```
@@ -209,7 +229,7 @@ runs: 42 / ok: 40 (95%)
 
 ## 今後の拡張
 
-[ROADMAP.md](ROADMAP.md) を参照。traceroute/MTU プローブ、QUIC/HTTP3、レポート共有を予定。
+[ROADMAP.md](ROADMAP.md) を参照。QUIC/HTTP3 チェック、レポート共有を予定。
 
 ## ライセンス
 

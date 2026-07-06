@@ -50,6 +50,9 @@ pub enum MsgKey {
     StageTls,
     StageHttp,
     StagePath,
+    StageTrace,
+    TraceUnsupported,
+    TraceNoData,
     NoNameservers,
     HostsNoOverride,
     NoProxyVars,
@@ -85,6 +88,18 @@ pub fn msg(lang: Lang, key: MsgKey) -> &'static str {
         StagePath => match lang {
             En => "Path quality",
             Ja => "経路品質",
+        },
+        StageTrace => match lang {
+            En => "Path trace",
+            Ja => "経路トレース",
+        },
+        TraceUnsupported => match lang {
+            En => "hop tracing requires Linux (tracepath-style probing)",
+            Ja => "ホップ単位のトレースは Linux のみ対応です (tracepath 方式)",
+        },
+        TraceNoData => match lang {
+            En => "no hop data (ICMP replies may be filtered on this network)",
+            Ja => "ホップ情報なし (このネットワークでは ICMP 応答がフィルタされている可能性)",
         },
         NoNameservers => match lang {
             En => "no nameservers found in resolv.conf",
@@ -387,6 +402,51 @@ pub fn path_line(
     }
 }
 
+// ── Path trace (stage 7) ────────────────────────────────────────────────
+
+/// 応答があったホップの 1 行 (例: "  3  203.0.113.45  12ms")
+pub fn trace_hop_line(_lang: Lang, index: u8, addr: &str, rtt: &str) -> String {
+    format!("{index:>2}  {addr}  {rtt}")
+}
+
+/// 無応答ホップの 1 行 (例: "  4  *  (no reply)")
+pub fn trace_hop_noreply_line(lang: Lang, index: u8) -> String {
+    match lang {
+        Lang::En => format!("{index:>2}  *  (no reply)"),
+        Lang::Ja => format!("{index:>2}  *  (応答なし)"),
+    }
+}
+
+pub fn trace_dest_reached_line(lang: Lang, hops: u8) -> String {
+    match lang {
+        Lang::En => format!("destination reached in {hops} hops"),
+        Lang::Ja => format!("宛先に到達 ({hops} ホップ)"),
+    }
+}
+
+pub fn path_mtu_line(lang: Lang, mtu: u16) -> String {
+    match lang {
+        Lang::En => format!("Path MTU: {mtu}"),
+        Lang::Ja => format!("経路 MTU: {mtu}"),
+    }
+}
+
+pub fn trace_failed_line(lang: Lang, error: &str) -> String {
+    match lang {
+        Lang::En => format!("hop trace failed: {error}"),
+        Lang::Ja => format!("経路トレース失敗: {error}"),
+    }
+}
+
+// Linux の trace プローブからのみ呼ばれる (他プラットフォームでは未使用)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn probe_trace_timeout(lang: Lang) -> String {
+    match lang {
+        Lang::En => "hop trace timed out".to_string(),
+        Lang::Ja => "経路トレースがタイムアウト".to_string(),
+    }
+}
+
 pub fn json_serialize_failed(lang: Lang, error: &str) -> String {
     match lang {
         Lang::En => format!("failed to serialize JSON: {error}"),
@@ -609,6 +669,16 @@ pub fn headline(lang: Lang, h: &Headline) -> String {
             Lang::En => "The network path is unstable (high packet loss / jitter)".into(),
             Lang::Ja => "ネットワーク経路が不安定です (パケットロス/ジッタ大)".into(),
         },
+        PmtuBlackhole => match lang {
+            Lang::En => {
+                "Path MTU is restricted and PMTUD is broken — large packets vanish silently (black hole)"
+                    .into()
+            }
+            Lang::Ja => {
+                "経路 MTU が制限されているのに PMTUD が機能していません — 大きいパケットが黙って消えます (ブラックホール)"
+                    .into()
+            }
+        },
         NoProblem => match lang {
             Lang::En => {
                 "No problem found. The path to this destination is healthy right now".into()
@@ -679,6 +749,10 @@ pub fn next_step(lang: Lang, h: &Headline) -> &'static str {
         UnstablePath => match lang {
             Lang::En => "On Wi-Fi, try a wired connection or the 5 GHz band. If already wired, the problem may be on your ISP's side",
             Lang::Ja => "Wi-Fi なら有線接続か 5GHz 帯への変更を試してください。有線なら回線事業者側の問題の可能性があります",
+        },
+        PmtuBlackhole => match lang {
+            Lang::En => "Check the MTU setting on your VPN/tunnel, and enable MSS clamping on the router. Lowering the interface MTU to the detected path MTU is a quick workaround",
+            Lang::Ja => "VPN/トンネルの MTU 設定を確認し、ルータで MSS clamp (TCP MSS 調整) を有効化してください。インタフェースの MTU を検出値まで下げるのが応急処置になります",
         },
         NoProblem => match lang {
             Lang::En => "If the problem is intermittent, run this again while the symptom is happening",
@@ -861,7 +935,44 @@ pub fn evidence_line(lang: Lang, e: &Evidence) -> String {
             Lang::En => "no anomalies in any stage that ran".into(),
             Lang::Ja => "実施した全ステージで異常なし".into(),
         },
+        LastRespondingHop { ip, index, path_len } => match lang {
+            Lang::En => format!("last responding hop: {ip} (hop {index} of ~{path_len})"),
+            Lang::Ja => format!("最後に応答したホップ: {ip} (ホップ {index} / 推定経路長 ~{path_len})"),
+        },
+        PmtuBlackholeObserved { mtu } => match lang {
+            Lang::En => format!(
+                "path MTU is {mtu} bytes, yet oversized DF packets trigger no ICMP notification (PMTUD black hole)"
+            ),
+            Lang::Ja => format!(
+                "経路 MTU が {mtu} バイトだが、超過パケットへの ICMP 通知が返ってこない (PMTUD ブラックホール)"
+            ),
+        },
     }
+}
+
+/// 障害ゾーン (最後に応答したホップの位置) に応じた切り分けガイダンス。
+/// 【次の一手】の末尾に追記される。
+pub fn zone_guidance(lang: Lang, zone: crate::probe::trace::HopZone) -> &'static str {
+    use crate::probe::trace::HopZone;
+    match zone {
+        HopZone::Home => match lang {
+            Lang::En => "The trace stops inside your home network (hop 1-2) — check or reboot your router/home gateway first",
+            Lang::Ja => "トレースは宅内 (ホップ 1-2) で止まっています — まずルータ/ホームゲートウェイの確認・再起動を",
+        },
+        HopZone::Isp => match lang {
+            Lang::En => "The trace stops in the early hops — likely inside your ISP's network; include the hop list when contacting them",
+            Lang::Ja => "トレースは序盤のホップで止まっています — ISP 網内の可能性が高いので、問い合わせ時にホップ一覧を添えてください",
+        },
+        HopZone::FarSide => match lang {
+            Lang::En => "The trace gets deep into the path — the problem is most likely on the far side (destination network)",
+            Lang::Ja => "トレースは経路の奥まで到達しています — 対岸 (相手側ネットワーク) の問題の可能性が高いです",
+        },
+    }
+}
+
+/// 【次の一手】本文にゾーンガイダンスを連結する
+pub fn append_guidance(base: &str, guidance: &str) -> String {
+    format!("{base} — {guidance}")
 }
 
 /// One secondary-finding bullet.

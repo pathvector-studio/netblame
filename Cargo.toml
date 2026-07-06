@@ -1,6 +1,6 @@
 [package]
 name = "netblame"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence."
 license = "MIT"
@@ -20,6 +20,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 owo-colors = { version = "4", features = ["supports-colors"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = "0.6"
+libc = "0.2"
 
 [profile.release]
 strip = true

@@ -5,7 +5,8 @@
 //! 文字列化は `Verdict::render` + `i18n` が言語ごとに行う。
 
 use crate::i18n::{self, Lang};
-use crate::report::{DnsOutcome, Report, TcpOutcome};
+use crate::probe::trace::{self, HopZone};
+use crate::report::{DnsOutcome, Report, TcpOutcome, TraceData, TraceReport};
 use serde::Serialize;
 
 /// 犯人カテゴリ
@@ -33,6 +34,8 @@ pub enum Culprit {
     ProxyInterference,
     /// 経路が不安定 (ロス/ジッタ大)
     UnstablePath,
+    /// PMTUD ブラックホール (経路 MTU 制限 + ICMP 通知の欠落)
+    PmtuBlackhole,
     /// サーバの応答が遅い (ネットワークは正常)
     ServerSlow,
     /// サーバがダウンしている / ポートが閉じている
@@ -56,6 +59,7 @@ impl Culprit {
             Culprit::TlsIntercepted => "tls_intercepted",
             Culprit::ProxyInterference => "proxy_interference",
             Culprit::UnstablePath => "unstable_path",
+            Culprit::PmtuBlackhole => "pmtu_blackhole",
             Culprit::ServerSlow => "server_slow",
             Culprit::ServerDown => "server_down",
             Culprit::NoProblem => "no_problem",
@@ -81,6 +85,7 @@ pub enum Headline {
     ProxyInterference,
     ServerSlow,
     UnstablePath,
+    PmtuBlackhole,
     NoProblem,
 }
 
@@ -126,6 +131,8 @@ pub enum Evidence {
     HttpHealthy { status: u16, ttfb: f64 },
     PathHealthy { loss_pct: f64, jitter: f64 },
     AllStagesOk,
+    LastRespondingHop { ip: String, index: u8, path_len: u8 },
+    PmtuBlackholeObserved { mtu: u16 },
 }
 
 /// 【所見】(副次的な発見) 1項目。
@@ -154,6 +161,9 @@ pub struct Verdict {
     pub headline: Headline,
     pub evidence: Vec<Evidence>,
     pub secondary: Vec<Finding>,
+    /// 経路トレースによる障害位置の推定 (宅内/ISP/対岸)。
+    /// あれば【次の一手】に切り分けガイダンスを追記する。
+    pub zone_hint: Option<HopZone>,
 }
 
 impl Verdict {
@@ -163,11 +173,17 @@ impl Verdict {
             headline,
             evidence,
             secondary: Vec::new(),
+            zone_hint: None,
         }
     }
 
     /// 指定言語で文字列化する。JSON 出力にもそのまま使う。
     pub fn render(&self, lang: Lang) -> RenderedVerdict {
+        let base_next = i18n::next_step(lang, &self.headline);
+        let next_step = match self.zone_hint {
+            Some(zone) => i18n::append_guidance(base_next, i18n::zone_guidance(lang, zone)),
+            None => base_next.to_string(),
+        };
         RenderedVerdict {
             culprit: self.culprit,
             culprit_code: self.culprit.code(),
@@ -177,7 +193,7 @@ impl Verdict {
                 .iter()
                 .map(|e| i18n::evidence_line(lang, e))
                 .collect(),
-            next_step: i18n::next_step(lang, &self.headline).to_string(),
+            next_step,
             secondary: self
                 .secondary
                 .iter()
@@ -204,7 +220,8 @@ const FAST_PUBLIC_DNS_MS: f64 = 100.0;
 const SLOW_TTFB_MS: f64 = 1000.0;
 const FAST_CONNECT_MS: f64 = 100.0;
 const LOSS_PCT_THRESHOLD: f64 = 10.0;
-const JITTER_MS_THRESHOLD: f64 = 50.0;
+/// 経路トレースの自動起動判定でも使う (main 参照)
+pub const JITTER_MS_THRESHOLD: f64 = 50.0;
 
 /// レポートから犯人を判定する純粋関数
 pub fn judge(report: &Report) -> Verdict {
@@ -215,7 +232,43 @@ pub fn judge(report: &Report) -> Verdict {
 
     let mut verdict = judge_primary(report, &d, &t);
     verdict.secondary.append(&mut secondary);
+    attach_trace_hint(report, &mut verdict);
     verdict
+}
+
+/// 実行済みの経路トレースデータがあれば取り出す
+fn trace_data(report: &Report) -> Option<&TraceData> {
+    match report.trace.as_ref()? {
+        TraceReport::Ran(data) => Some(data),
+        _ => None,
+    }
+}
+
+/// 経路系の判定 (TcpBlocked / ServerDown / UnstablePath) に対して、
+/// トレース結果から「どこで壊れているか」の根拠とガイダンスを付与する
+fn attach_trace_hint(report: &Report, verdict: &mut Verdict) {
+    if !matches!(
+        verdict.culprit,
+        Culprit::TcpBlocked | Culprit::ServerDown | Culprit::UnstablePath
+    ) {
+        return;
+    }
+    let Some(td) = trace_data(report) else {
+        return;
+    };
+    let Some(loc) = trace::localize_failure(&td.hops, td.dest_reached) else {
+        return;
+    };
+    verdict.evidence.push(Evidence::LastRespondingHop {
+        ip: loc.last_hop.to_string(),
+        index: loc.last_index,
+        path_len: loc.path_len_estimate,
+    });
+    // 宛先まで到達している場合、止まった場所からのゾーン推定は意味を
+    // 持たないのでガイダンスは付けない
+    if !td.dest_reached {
+        verdict.zone_hint = Some(loc.zone);
+    }
 }
 
 /// DNS 結果の要約ビュー
@@ -472,6 +525,27 @@ fn judge_primary(report: &Report, d: &DnsView, t: &TcpView) -> Verdict {
                 ev.push(Evidence::HostnameMismatch);
             }
             return Verdict::new(Culprit::TlsCertInvalid, Headline::TlsCertInvalid, ev);
+        }
+    }
+
+    // 7.5. PMTUD ブラックホール: TCP 接続 (小パケット) は通るのに、
+    // 経路 MTU が 1500 未満で超過 DF パケットへの ICMP 通知が返らない
+    // → 大きな転送だけが黙って死ぬ、VPN/トンネルの典型事故
+    if t.any_ok {
+        if let Some(td) = trace_data(report) {
+            let analysis = trace::analyze_mtu(td.kernel_mtu, &td.mtu_probes);
+            if analysis.blackhole {
+                if let Some(mtu) = analysis.path_mtu {
+                    return Verdict::new(
+                        Culprit::PmtuBlackhole,
+                        Headline::PmtuBlackhole,
+                        vec![
+                            Evidence::PmtuBlackholeObserved { mtu },
+                            Evidence::TcpFineSoPathOk,
+                        ],
+                    );
+                }
+            }
         }
     }
 
@@ -782,6 +856,30 @@ mod tests {
             tls: Some(healthy_tls()),
             http: Some(healthy_http()),
             path: Some(healthy_path()),
+            trace: None,
+        }
+    }
+
+    /// 経路トレース結果 (Ran) を組み立てるヘルパ
+    fn trace_ran(
+        hops: Vec<TraceHop>,
+        dest_reached: bool,
+        kernel_mtu: Option<u16>,
+        mtu_probes: Vec<MtuProbe>,
+    ) -> Option<TraceReport> {
+        Some(TraceReport::Ran(TraceData {
+            hops,
+            dest_reached,
+            kernel_mtu,
+            mtu_probes,
+        }))
+    }
+
+    fn thop(index: u8, addr: Option<&str>) -> TraceHop {
+        TraceHop {
+            index,
+            addr: addr.map(|a| a.parse().unwrap()),
+            rtt_ms: addr.map(|_| 10.0),
         }
     }
 
@@ -968,6 +1066,169 @@ mod tests {
             jitter_ms: Some(120.0),
         });
         assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
+    }
+
+    #[test]
+    fn pmtu_blackhole_detected() {
+        // TCP は通るが、経路 MTU 1280 超の DF パケットが ICMP 通知なしで消える
+        let mut r = base_report();
+        r.trace = trace_ran(
+            vec![thop(1, Some("192.168.1.1")), thop(2, Some("10.0.0.1"))],
+            true,
+            Some(1500),
+            vec![
+                MtuProbe {
+                    size: 1500,
+                    outcome: MtuProbeOutcome::Silent,
+                },
+                MtuProbe {
+                    size: 1400,
+                    outcome: MtuProbeOutcome::Silent,
+                },
+                MtuProbe {
+                    size: 1280,
+                    outcome: MtuProbeOutcome::Delivered,
+                },
+            ],
+        );
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::PmtuBlackhole);
+        assert!(v
+            .evidence
+            .iter()
+            .any(|e| matches!(e, Evidence::PmtuBlackholeObserved { mtu: 1280 })));
+    }
+
+    #[test]
+    fn healthy_mtu_trace_stays_no_problem() {
+        // --trace 強制実行で経路 MTU 1500 が確認できた場合は問題なしのまま
+        let mut r = base_report();
+        r.trace = trace_ran(
+            vec![thop(1, Some("192.168.1.1")), thop(2, Some("93.184.216.34"))],
+            true,
+            Some(1500),
+            vec![MtuProbe {
+                size: 1500,
+                outcome: MtuProbeOutcome::Delivered,
+            }],
+        );
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+    }
+
+    #[test]
+    fn pmtud_working_is_not_blackhole_verdict() {
+        // ICMP frag-needed が返っている = PMTUD は機能 → ブラックホールではない
+        let mut r = base_report();
+        r.trace = trace_ran(
+            vec![],
+            true,
+            Some(1400),
+            vec![MtuProbe {
+                size: 1500,
+                outcome: MtuProbeOutcome::FragNeeded { mtu: Some(1400) },
+            }],
+        );
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+    }
+
+    #[test]
+    fn tcp_blocked_gains_hop_localization() {
+        // TCP 全滅 + トレースがホップ 4 で止まる → ISP ゾーンのガイダンス
+        let mut r = base_report();
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        r.trace = trace_ran(
+            vec![
+                thop(1, Some("192.168.1.1")),
+                thop(2, Some("10.0.0.1")),
+                thop(3, Some("100.64.0.1")),
+                thop(4, Some("203.0.113.1")),
+                thop(5, None),
+                thop(6, None),
+            ],
+            false,
+            None,
+            vec![],
+        );
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::TcpBlocked);
+        assert_eq!(v.zone_hint, Some(crate::probe::trace::HopZone::Isp));
+        assert!(v.evidence.iter().any(|e| matches!(
+            e,
+            Evidence::LastRespondingHop {
+                index: 4,
+                path_len: 6,
+                ..
+            }
+        )));
+        // レンダリング: 根拠にホップ、次の一手にゾーンガイダンス
+        let en = v.render(Lang::En);
+        assert!(en
+            .evidence
+            .iter()
+            .any(|e| e.contains("last responding hop: 203.0.113.1 (hop 4 of ~6)")));
+        assert!(en.next_step.contains("ISP's network"));
+        let ja = v.render(Lang::Ja);
+        assert!(ja
+            .evidence
+            .iter()
+            .any(|e| e.contains("最後に応答したホップ: 203.0.113.1")));
+        assert!(ja.next_step.contains("ISP 網内"));
+    }
+
+    #[test]
+    fn tcp_blocked_home_zone_when_hop_one_only() {
+        let mut r = base_report();
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        r.trace = trace_ran(
+            vec![thop(1, Some("192.168.1.1")), thop(2, None), thop(3, None)],
+            false,
+            None,
+            vec![],
+        );
+        let v = judge(&r);
+        assert_eq!(v.zone_hint, Some(crate::probe::trace::HopZone::Home));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.next_step.contains("宅内"));
+    }
+
+    #[test]
+    fn render_pmtu_blackhole_en_and_ja() {
+        let mut r = base_report();
+        r.trace = trace_ran(
+            vec![],
+            true,
+            Some(1400),
+            vec![
+                MtuProbe {
+                    size: 1500,
+                    outcome: MtuProbeOutcome::Silent,
+                },
+                MtuProbe {
+                    size: 1472,
+                    outcome: MtuProbeOutcome::Silent,
+                },
+            ],
+        );
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::PmtuBlackhole);
+        let en = v.render(Lang::En);
+        assert_eq!(en.culprit_code, "pmtu_blackhole");
+        assert!(en.headline.contains("black hole"));
+        assert!(en.evidence.iter().any(|e| e.contains("1400 bytes")));
+        assert!(en.next_step.contains("MSS clamping"));
+        let ja = v.render(Lang::Ja);
+        assert!(ja.headline.contains("ブラックホール"));
+        assert!(ja
+            .evidence
+            .iter()
+            .any(|e| e.contains("経路 MTU が 1400 バイト")));
+        assert!(ja.next_step.contains("MSS clamp"));
     }
 
     #[test]

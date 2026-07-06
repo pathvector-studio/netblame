@@ -11,7 +11,7 @@ mod verdict;
 use clap::Parser;
 use i18n::{msg, Lang, MsgKey};
 use owo_colors::{OwoColorize, Stream::Stdout};
-use report::{DnsOutcome, Report, TargetInfo, TcpOutcome};
+use report::{DnsOutcome, Report, TargetInfo, TcpOutcome, TraceReport};
 use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -48,6 +48,12 @@ struct Args {
     /// timestamped timeline; Ctrl-C stops and prints a summary
     #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "30")]
     watch: Option<u64>,
+
+    /// Always run the hop-level path trace (tracepath-style, Linux only).
+    /// Without this flag it runs automatically only when a path problem
+    /// (TCP timeout, packet loss, high jitter) is detected
+    #[arg(long)]
+    trace: bool,
 }
 
 /// パース済みターゲット
@@ -173,6 +179,12 @@ impl Printer {
             println!("  {} {}", "✗".if_supports_color(Stdout, |t| t.red()), msg);
         }
     }
+    /// 記号なしのインデント行 (ホップ一覧など)
+    fn plain(&self, msg: &str) {
+        if !self.quiet {
+            println!("  {msg}");
+        }
+    }
 }
 
 fn fmt_ms(ms: Option<f64>) -> String {
@@ -185,6 +197,7 @@ async fn diagnose(
     target: &Target,
     timeout: Duration,
     samples: u32,
+    force_trace: bool,
     p: &Printer,
 ) -> (Report, Verdict) {
     let lang = p.lang;
@@ -437,6 +450,29 @@ async fn diagnose(
         _ => None,
     };
 
+    // ── ステージ7: 経路トレース ─────────────────────
+    // --trace 指定時は常に実行。それ以外は、前段で経路系の問題
+    // (TCP タイムアウト / ロス / ジッタ大) が出たときだけ自動実行する
+    // (最悪 15-30 秒かかるため、健全時はスキップ)。
+    let tcp_timed_out = tcp_report
+        .probes
+        .iter()
+        .any(|pr| pr.outcome == TcpOutcome::Timeout);
+    let path_bad = path_report.as_ref().is_some_and(|r| {
+        r.loss_pct > 0.0
+            || r.jitter_ms
+                .is_some_and(|j| j > verdict::JITTER_MS_THRESHOLD)
+    });
+    let trace_report = match primary_ip {
+        Some(ip) if force_trace || tcp_timed_out || path_bad => {
+            p.section(MsgKey::StageTrace);
+            let r = probe::trace::run(ip, lang).await;
+            print_trace(&r, p);
+            Some(r)
+        }
+        _ => None,
+    };
+
     // ── 判定 ───────────────────────────────────────
     let full_report = Report {
         target: TargetInfo {
@@ -453,10 +489,50 @@ async fn diagnose(
         tls: tls_report,
         http: http_report,
         path: path_report,
+        trace: trace_report,
     };
 
     let verdict = judge(&full_report);
     (full_report, verdict)
+}
+
+/// 経路トレースステージの結果を表示する
+fn print_trace(r: &TraceReport, p: &Printer) {
+    let lang = p.lang;
+    match r {
+        TraceReport::Unsupported => p.warn(msg(lang, MsgKey::TraceUnsupported)),
+        TraceReport::Failed(e) => p.warn(&i18n::trace_failed_line(lang, e)),
+        TraceReport::Ran(data) => {
+            if data.hops.is_empty() {
+                p.warn(msg(lang, MsgKey::TraceNoData));
+            }
+            for hop in &data.hops {
+                match &hop.addr {
+                    Some(ip) => p.plain(&i18n::trace_hop_line(
+                        lang,
+                        hop.index,
+                        &ip.to_string(),
+                        &fmt_ms(hop.rtt_ms),
+                    )),
+                    None => p.plain(&i18n::trace_hop_noreply_line(lang, hop.index)),
+                }
+            }
+            if data.dest_reached {
+                if let Some(last) = data.hops.last() {
+                    p.ok(&i18n::trace_dest_reached_line(lang, last.index));
+                }
+            }
+            let analysis = probe::trace::analyze_mtu(data.kernel_mtu, &data.mtu_probes);
+            if let Some(mtu) = analysis.path_mtu {
+                let line = i18n::path_mtu_line(lang, mtu);
+                if analysis.blackhole {
+                    p.warn(&line);
+                } else {
+                    p.ok(&line);
+                }
+            }
+        }
+    }
 }
 
 /// 【判定】/【根拠】/【所見】/【次の一手】ブロックを表示する
@@ -517,6 +593,7 @@ async fn watch_loop(
     timeout: Duration,
     samples: u32,
     interval_secs: u64,
+    force_trace: bool,
     lang: Lang,
 ) -> ! {
     let interval = Duration::from_secs(interval_secs.max(1));
@@ -530,7 +607,7 @@ async fn watch_loop(
 
     loop {
         let outcome = tokio::select! {
-            r = diagnose(target, timeout, samples, &quiet) => Some(r),
+            r = diagnose(target, timeout, samples, force_trace, &quiet) => Some(r),
             _ = tokio::signal::ctrl_c() => None,
         };
         let Some((report, verdict)) = outcome else {
@@ -661,7 +738,7 @@ async fn main() {
             eprintln!("{err_prefix}: {}", msg(lang, MsgKey::JsonWatchConflict));
             std::process::exit(2);
         }
-        watch_loop(&target, timeout, samples, interval, lang).await;
+        watch_loop(&target, timeout, samples, interval, args.trace, lang).await;
     }
 
     let p = Printer {
@@ -678,7 +755,7 @@ async fn main() {
         );
     }
 
-    let (full_report, verdict) = diagnose(&target, timeout, samples, &p).await;
+    let (full_report, verdict) = diagnose(&target, timeout, samples, args.trace, &p).await;
     let rendered = verdict.render(lang);
 
     if args.json {

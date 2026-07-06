@@ -52,6 +52,9 @@ netblame <target> [flags]
 | `--no-color` | Disable colored output | - |
 | `--lang <en\|ja>` | Output language | auto-detect from locale |
 | `--watch [<secs>]` | Repeat the diagnosis on an interval, print a timestamped timeline; Ctrl-C shows a summary | 30 |
+| `--trace` | Always run the hop-level path trace (see below) | auto |
+
+**Path trace auto-trigger**: without `--trace`, the hop-level trace stage runs automatically only when an earlier stage found a path problem (a TCP target timed out, packet loss > 0%, or high jitter). It adds up to ~15-30 s in the worst case, so it is skipped when everything is healthy. The trace uses tracepath-style probing (UDP + `IP_RECVERR`, **no root required**) and is **Linux-only** — on other platforms a note is printed and the stage is skipped.
 
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error
 
@@ -67,12 +70,13 @@ Measurement and judgment are strictly separated: each stage only appends facts t
 4. **TLS** (`tls.rs`) — verified handshake via rustls + webpki-roots; records TLS version, days until certificate expiry, hostname match. On verification failure it reconnects **without verification (read-only, diagnostic only)** to extract the presented issuer, and flags middlebox fingerprints (Zscaler, FortiGate, …) as probable TLS interception
 5. **HTTP** (`http.rs`) — GET via reqwest (rustls backend); status, redirect chain (max 5), TTFB and total time
 6. **Path quality** (`path.rs`) — N TCP connect-pings to the primary IP; computes loss %, average RTT and jitter (stddev)
+7. **Path trace** (`trace.rs`, Linux only, no root) — tracepath-style traceroute: an unprivileged UDP socket with `IP_RECVERR` receives ICMP time-exceeded / port-unreachable errors via `MSG_ERRQUEUE`, mapping each hop's router address and RTT (TTL 1-30, 2 probes/hop, 1 s timeout). Then DF-flagged datagrams of decreasing size (1500 → 1024) are sent with `IP_PMTUDISC_PROBE` to measure the path MTU and — crucially — whether oversized packets produce ICMP frag-needed replies or silently vanish (the PMTUD black hole signature)
 
 ### Verdict engine (`src/verdict.rs`)
 
 `fn judge(report: &Report) -> Verdict` is a **pure function with no I/O** (covered by unit tests) that picks exactly one culprit category from the evidence:
 
-`LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `ServerSlow` / `ServerDown` / `NoProblem`
+`LocalDnsBroken` / `LocalDnsSlow` / `DnsAnswerMismatch` / `NameDoesNotExist` / `TcpBlocked` / `Ipv6Broken` / `TlsCertExpired` / `TlsCertInvalid` / `TlsIntercepted` / `ProxyInterference` / `UnstablePath` / `PmtuBlackhole` / `ServerSlow` / `ServerDown` / `NoProblem`
 
 Selected reasoning rules (in priority order):
 
@@ -83,13 +87,15 @@ Selected reasoning rules (in priority order):
 - IPv6 dead while IPv4 fine → broken IPv6 path (common in the wild)
 - Fast connect (<100ms) but slow TTFB (>1000ms) → **the server is slow, the network is fine**
 - Loss ≥10% or jitter >50ms → unstable path
+- TCP connects fine, but path MTU < 1500 **and** oversized DF probes vanish without any ICMP frag-needed reply → **`PmtuBlackhole`** — small packets pass while large transfers stall, the classic VPN/tunnel failure. Next step: check the tunnel MTU / enable MSS clamping
+- When the culprit is path-related (`TcpBlocked` / `ServerDown` / `UnstablePath`) and hop data exists, the evidence gains "last responding hop: <ip> (hop N of ~M)" and the next step gains a localization hint: dies at hop 1-2 → your home network (router/gateway); early hops → ISP; deep in the path → the far side
 
 Non-primary findings (hosts overrides, proxy presence, CDN answer differences, soon-to-expire certificates) are attached as secondary notes.
 
 ## Development
 
 ```bash
-cargo test           # verdict engine + parser unit tests
+cargo test           # verdict engine + trace analysis + parser unit tests
 cargo clippy         # zero warnings
 cargo build --release
 ```
@@ -112,7 +118,6 @@ runs: 42 / ok: 40 (95%)
 
 See [ROADMAP.md](ROADMAP.md).
 
-- **traceroute / MTU probing** — localize the fault (home vs ISP vs far side), detect PMTUD black holes (the classic VPN failure); needs CAP_NET_RAW handling
 - **QUIC/HTTP3** — detect the "UDP 443 blocked, only HTTP/3 broken" class of failures
 - **Report-sharing service** — one command to upload a `--json` report and get a short URL you can hand to your IT desk or ISP support
 
