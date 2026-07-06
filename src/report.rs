@@ -188,6 +188,8 @@ pub struct TraceHop {
 }
 
 /// DF ビット付き MTU プローブ 1 発の結果分類
+// 構築するのは Linux 専用の trace プローブのみ (非 Linux では dead_code 扱いになる)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "code", content = "detail")]
 pub enum MtuProbeOutcome {
