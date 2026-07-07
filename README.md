@@ -53,6 +53,8 @@ netblame <target> [flags]
 | `--lang <en\|ja>` | Output language | auto-detect from locale |
 | `--watch [<secs>]` | Repeat the diagnosis on an interval, print a timestamped timeline; Ctrl-C shows a summary | 30 |
 | `--trace` | Always run the hop-level path trace (see below) | auto |
+| `--share` | After the diagnosis, upload the full report and print a shareable URL (see below) | - |
+| `--share-url <base>` | Share server base URL to upload to | env `NETBLAME_SHARE_URL`, else `https://share.pathvector.dev` |
 
 **Path trace auto-trigger**: without `--trace`, the hop-level trace stage runs automatically only when an earlier stage found a path problem (a TCP target timed out, packet loss > 0%, or high jitter). It adds up to ~15-30 s in the worst case, so it is skipped when everything is healthy. The trace uses tracepath-style probing (UDP + `IP_RECVERR`, **no root required**) and is **Linux-only** — on other platforms a note is printed and the stage is skipped.
 
@@ -118,11 +120,64 @@ watching every 30s — press Ctrl-C to stop and show a summary
 runs: 42 / ok: 40 (95%)
 ```
 
+## Report sharing (`--share`)
+
+Sometimes the fastest way to get help is to hand someone a link instead of a wall of terminal output:
+
+```
+$ netblame --share https://example.com
+...
+Report shared: https://share.pathvector.dev/r/ab12cd34ef
+```
+
+`--share` runs the normal diagnosis first (full output still prints to your terminal), then uploads the same JSON payload as `--json` — plus `netblame_version` and `created_lang` so the server can render it — to `{base}/api/reports`. The base URL is, in priority order: `--share-url <url>`, the `NETBLAME_SHARE_URL` environment variable, then `https://share.pathvector.dev` (a hosted instance is planned but not live yet — until then, uploads to the default URL will simply fail).
+
+Upload failures print a localized warning and never change the process exit code — that code always reflects the diagnosis result, not whether the upload succeeded. `--share` cannot be combined with `--watch`.
+
+### Self-hosting the share server
+
+The server is a second, optional binary (`netblame-share`) built from the same crate behind a feature flag, so the default `netblame` binary and release artifacts are completely unaffected by it:
+
+```bash
+cargo build --release --features share-server
+# binary at target/release/netblame-share
+```
+
+```
+netblame-share [flags]
+
+--port <port>              Port to listen on (default 8788)
+--data-dir <dir>           Where to store report JSON files (default ./share-data)
+--max-body-kb <kb>         Max accepted upload size (default 256)
+--retention-days <days>    Delete stored reports older than this (default 30, pruned on every upload)
+--rate-limit <n>           Max uploads per IP per rolling minute (default 20)
+--public-url <url>         Public base URL used to build share links (default: derived from the request's Host header)
+```
+
+Endpoints: `POST /api/reports` (upload, returns `{"id", "url"}`), `GET /r/{id}` (server-rendered HTML report page, no JS), `GET /api/reports/{id}` (raw JSON).
+
+Point your own `netblame` runs at it with `--share-url http://your-host:8788` or `export NETBLAME_SHARE_URL=http://your-host:8788`.
+
+Minimal systemd unit:
+
+```ini
+[Unit]
+Description=netblame-share
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/netblame-share --port 8788 --data-dir /var/lib/netblame-share --public-url https://share.example.com
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=netblame-share
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md).
-
-- **Report-sharing service** — one command to upload a `--json` report and get a short URL you can hand to your IT desk or ISP support
 
 ## License
 

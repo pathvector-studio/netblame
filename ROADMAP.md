@@ -9,10 +9,10 @@
 
 - ✅ traceroute / MTU プローブ — `--trace` (経路系の問題検出時は自動起動)。tracepath 方式 (UDP + `IP_RECVERR`、root 不要、Linux のみ) でホップ単位に「宅内 or ISP or 対岸」を切り分け、DF プローブで PMTUD ブラックホール (`PmtuBlackhole`) を検出。非対応環境・ICMP フィルタ環境では graceful degrade
 
-## v0.4
+## v0.4 (完了)
 
 - ✅ QUIC/HTTP3 チェック — 「UDP 443 だけブロックされて HTTP/3 が壊れる」事故の検出。https ターゲットで HTTP ステージ後に実際の QUIC (ALPN h3) ハンドシェイクを試行し、alt-svc の h3 広告と突き合わせて `Udp443Blocked` を判定(TCP/TLS/HTTP が全て健全な場合のみ主犯にする低優先度の判定)
-- [ ] レポート共有 — `--share` で `--json` レポートをアップロードして共有 URL を発行(share.pathvector.dev 構想)
+- ✅ レポート共有 — `--share` で `--json` 相当のレポートをアップロードして共有 URL を発行。自己ホスト可能なサーバ本体 (`netblame-share`、`cargo build --features share-server`) を同梱。`share.pathvector.dev` での実運用ホスティングは別途のインフラ整備タスクとして残る
 
 ## v1.0
 

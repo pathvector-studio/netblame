@@ -3,19 +3,15 @@
 //! quality) against a URL/host and names the most likely culprit, with
 //! evidence, in plain English or Japanese.
 
-mod i18n;
-mod probe;
-mod report;
-mod verdict;
-
 use clap::Parser;
-use i18n::{msg, Lang, MsgKey};
+use netblame::i18n::{self, msg, Lang, MsgKey};
+use netblame::report::{self, DnsOutcome, Report, TargetInfo, TcpOutcome, TraceReport};
+use netblame::verdict::{self, judge, Culprit, RenderedVerdict, Verdict};
+use netblame::{probe, share, ParseError};
 use owo_colors::{OwoColorize, Stream::Stdout};
-use report::{DnsOutcome, Report, TargetInfo, TcpOutcome, TraceReport};
 use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::Duration;
-use verdict::{judge, Culprit, RenderedVerdict, Verdict};
 
 /// Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence.
 #[derive(Parser, Debug)]
@@ -54,6 +50,17 @@ struct Args {
     /// (TCP timeout, packet loss, high jitter) is detected
     #[arg(long)]
     trace: bool,
+
+    /// After the diagnosis, upload the full report to a share server and
+    /// print a shareable URL. Upload failures are printed as a warning; the
+    /// process exit code still reflects the diagnosis result, not the upload
+    #[arg(long)]
+    share: bool,
+
+    /// Base URL of the share server to upload to (default: env
+    /// NETBLAME_SHARE_URL, falling back to https://share.pathvector.dev)
+    #[arg(long, value_name = "URL")]
+    share_url: Option<String>,
 }
 
 /// パース済みターゲット
@@ -64,15 +71,6 @@ struct Target {
     use_tls: bool,
     do_http: bool,
     path: String,
-}
-
-/// ターゲット文字列のパースエラー (文言は i18n::parse_error が担当)
-#[derive(Debug, Clone, PartialEq)]
-pub enum ParseError {
-    UnsupportedScheme(String),
-    EmptyHost,
-    UnclosedIpv6,
-    InvalidPort(String),
 }
 
 fn parse_target(raw: &str) -> Result<Target, ParseError> {
@@ -781,6 +779,10 @@ async fn main() {
             eprintln!("{err_prefix}: {}", msg(lang, MsgKey::JsonWatchConflict));
             std::process::exit(2);
         }
+        if args.share {
+            eprintln!("{err_prefix}: {}", msg(lang, MsgKey::ShareWatchConflict));
+            std::process::exit(2);
+        }
         watch_loop(&target, timeout, samples, interval, args.trace, lang).await;
     }
 
@@ -824,11 +826,71 @@ async fn main() {
         print_verdict_block(&rendered, lang);
     }
 
+    if args.share {
+        upload_report(&full_report, &rendered, lang, args.share_url.as_deref()).await;
+    }
+
     std::process::exit(if verdict.culprit == Culprit::NoProblem {
         0
     } else {
         1
     });
+}
+
+/// --share: POST the full JSON payload to the share server and print the
+/// resulting URL. Failures are printed as a localized warning but never
+/// change the process exit code — the diagnosis result already decided that.
+async fn upload_report(
+    report: &Report,
+    rendered: &RenderedVerdict,
+    lang: Lang,
+    share_url: Option<&str>,
+) {
+    let base_url = share::resolve_base_url(
+        share_url,
+        std::env::var("NETBLAME_SHARE_URL").ok().as_deref(),
+    );
+    let payload = share::SharePayload {
+        report,
+        verdict: rendered,
+        netblame_version: env!("CARGO_PKG_VERSION"),
+        created_lang: lang,
+    };
+
+    let endpoint = format!("{base_url}/api/reports");
+    let client = reqwest::Client::new();
+    let result = client.post(&endpoint).json(&payload).send().await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => match resp.json::<share::ShareResponse>().await {
+            Ok(share_resp) => {
+                println!("{}", i18n::share_success_line(lang, &share_resp.url));
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} {}",
+                    "⚠".if_supports_color(Stdout, |t| t.yellow()),
+                    i18n::share_failed_line(lang, &e.to_string())
+                );
+            }
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!(
+                "{} {}",
+                "⚠".if_supports_color(Stdout, |t| t.yellow()),
+                i18n::share_failed_line(lang, &format!("{status}: {body}"))
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{} {}",
+                "⚠".if_supports_color(Stdout, |t| t.yellow()),
+                i18n::share_failed_line(lang, &e.to_string())
+            );
+        }
+    }
 }
 
 #[cfg(test)]

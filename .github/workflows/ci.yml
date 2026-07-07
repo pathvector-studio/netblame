@@ -24,3 +24,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets --features share-server -- -D warnings
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --features share-server

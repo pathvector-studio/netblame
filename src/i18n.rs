@@ -7,10 +7,12 @@
 use crate::report::DnsOutcome;
 use crate::verdict::{Evidence, Finding, Headline};
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 /// Output language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Lang {
     En,
     Ja,
@@ -72,6 +74,7 @@ pub enum MsgKey {
     JsonWatchConflict,
     WatchSummaryHeader,
     WatchProblemsHeader,
+    ShareWatchConflict,
 }
 
 pub fn msg(lang: Lang, key: MsgKey) -> &'static str {
@@ -177,6 +180,10 @@ pub fn msg(lang: Lang, key: MsgKey) -> &'static str {
         WatchProblemsHeader => match lang {
             En => "Problems seen:",
             Ja => "検出した問題:",
+        },
+        ShareWatchConflict => match lang {
+            En => "--share cannot be combined with --watch",
+            Ja => "--share と --watch は同時に指定できません",
         },
     }
 }
@@ -503,10 +510,33 @@ pub fn json_serialize_failed(lang: Lang, error: &str) -> String {
     }
 }
 
+// ── Report sharing (--share, v0.5) ──────────────────────────────────────
+
+pub fn share_uploading_line(lang: Lang, base_url: &str) -> String {
+    match lang {
+        Lang::En => format!("uploading report to {base_url}…"),
+        Lang::Ja => format!("{base_url} にレポートをアップロードしています…"),
+    }
+}
+
+pub fn share_success_line(lang: Lang, url: &str) -> String {
+    match lang {
+        Lang::En => format!("Report shared: {url}"),
+        Lang::Ja => format!("レポートを共有しました: {url}"),
+    }
+}
+
+pub fn share_failed_line(lang: Lang, error: &str) -> String {
+    match lang {
+        Lang::En => format!("could not share the report: {error}"),
+        Lang::Ja => format!("レポートの共有に失敗しました: {error}"),
+    }
+}
+
 // ── Target parse errors ─────────────────────────────────────────────────
 
 pub fn parse_error(lang: Lang, e: &crate::ParseError) -> String {
-    use crate::ParseError::*;
+    use crate::ParseError::*; // re-exported at crate root (see lib.rs)
     match e {
         UnsupportedScheme(raw) => match lang {
             Lang::En => format!("unsupported scheme: {raw}"),

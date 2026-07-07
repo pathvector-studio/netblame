@@ -51,6 +51,8 @@ netblame <target> [flags]
 | `--lang <en\|ja>` | 出力言語 | ロケールから自動判定 |
 | `--watch [<秒>]` | 診断を繰り返しタイムライン表示。Ctrl-C でサマリー | 30 |
 | `--trace` | ホップ単位の経路トレースを常に実行 (下記参照) | 自動 |
+| `--share` | 診断後にレポートをアップロードし、共有 URL を表示 (下記参照) | - |
+| `--share-url <base>` | アップロード先の共有サーバ base URL | 環境変数 `NETBLAME_SHARE_URL`、なければ `https://share.pathvector.dev` |
 
 **経路トレースの自動起動**: `--trace` を付けなくても、前段のステージで経路系の問題 (TCP タイムアウト / パケットロス > 0% / ジッタ大) が見つかったときだけ自動で実行されます。最悪 15〜30 秒ほどかかるため、健全時はスキップされます。トレースは tracepath 方式 (UDP + `IP_RECVERR`) で **root 権限不要**、ただし **Linux のみ対応**です (他 OS ではその旨を表示してスキップ)。
 
@@ -243,7 +245,7 @@ $ netblame https://expired.badssl.com --samples 2
 ## 開発
 
 ```bash
-cargo test           # 判定エンジン + トレース解析 + パーサのユニットテスト (59 件)
+cargo test           # 判定エンジン + トレース解析 + パーサのユニットテスト
 cargo clippy         # 警告ゼロ
 cargo build --release
 ```
@@ -261,9 +263,64 @@ watching every 30s — press Ctrl-C to stop and show a summary
 runs: 42 / ok: 40 (95%)
 ```
 
+## レポート共有 (`--share`)
+
+ターミナルの出力をそのまま貼るより、リンク 1 つで共有できた方が早いこともあります。
+
+```
+$ netblame --share https://example.com
+...
+レポートを共有しました: https://share.pathvector.dev/r/ab12cd34ef
+```
+
+`--share` はまず通常の診断を実行し (ターミナルへの出力はそのまま表示されます)、その後 `--json` と同じ JSON ペイロードに `netblame_version` と `created_lang` (サーバがレンダリングに使う言語) を加えて `{base}/api/reports` にアップロードします。アップロード先の base URL は優先順に `--share-url <url>` → 環境変数 `NETBLAME_SHARE_URL` → `https://share.pathvector.dev` (ホステッド版は構想段階でまだ稼働していません。それまでは既定 URL へのアップロードは失敗します)。
+
+アップロードに失敗した場合はローカライズされた警告を表示しますが、プロセスの終了コードは変わりません — 終了コードは常に診断結果を反映し、アップロードの成否とは無関係です。`--share` は `--watch` と同時指定できません。
+
+### 共有サーバの自己ホスティング
+
+サーバは同じ crate から feature flag でビルドされる第 2 のバイナリ (`netblame-share`) です。既定の `netblame` バイナリやリリース成果物には一切影響しません。
+
+```bash
+cargo build --release --features share-server
+# バイナリは target/release/netblame-share
+```
+
+```
+netblame-share [flags]
+
+--port <port>              待受ポート (既定 8788)
+--data-dir <dir>           レポート JSON の保存先 (既定 ./share-data)
+--max-body-kb <kb>         アップロード上限サイズ (既定 256)
+--retention-days <days>    この日数を超えた保存レポートを削除 (既定 30、アップロード毎にプルーニング)
+--rate-limit <n>           IP ごとの 1 分あたり最大アップロード数 (既定 20)
+--public-url <url>         共有リンク生成に使う公開 base URL (既定: リクエストの Host ヘッダから導出)
+```
+
+エンドポイント: `POST /api/reports` (アップロード、`{"id", "url"}` を返す)、`GET /r/{id}` (サーバサイドレンダリングされた HTML レポートページ、JS 不使用)、`GET /api/reports/{id}` (生 JSON)。
+
+自分の `netblame` 実行をこのサーバに向けるには `--share-url http://your-host:8788` または `export NETBLAME_SHARE_URL=http://your-host:8788` を使ってください。
+
+最小構成の systemd unit:
+
+```ini
+[Unit]
+Description=netblame-share
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/netblame-share --port 8788 --data-dir /var/lib/netblame-share --public-url https://share.example.com
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=netblame-share
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## 今後の拡張
 
-[ROADMAP.md](ROADMAP.md) を参照。レポート共有を予定。
+[ROADMAP.md](ROADMAP.md) を参照。
 
 ## ライセンス
 
