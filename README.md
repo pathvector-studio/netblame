@@ -48,6 +48,7 @@ netblame <target> [flags]
 |---|---|---|
 | `--json` | Emit the full machine-readable report (report + verdict) as JSON | - |
 | `--timeout <secs>` | Per-probe timeout | 5 |
+| `--max-time <secs>` | Overall wall-clock deadline for the whole diagnosis (curl-style). `--timeout` bounds each probe, so a full staged run can take several multiples of it; `--max-time` caps the total. When it expires, remaining stages are skipped and a **partial report is still printed** — text gets a `[TRUNCATED]` banner, JSON gets `report.completeness` (`complete` / `truncated_reason` / `ran_stages` / `skipped_stages`) | unset (unbounded) |
 | `--samples <n>` | Number of latency samples | 5 |
 | `--no-color` | Disable colored output | - |
 | `--lang <en\|ja>` | Output language | auto-detect from locale |
@@ -60,7 +61,9 @@ netblame <target> [flags]
 
 **QUIC/HTTP3 probe**: the QUIC probe stage runs automatically (no flag needed) for `https` targets only, right after the HTTP stage. It is cross-platform (Linux and macOS).
 
-**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error
+**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` before any verdict was reached (if a culprit was already identified when the deadline hit, the normal culprit exit code is kept)
+
+**Per-stage timings**: the JSON report always includes `report.stage_durations` (milliseconds per stage), so you can see exactly where a slow diagnosis spent its time — e.g. the QUIC probe waiting out its full timeout against a host with no HTTP/3.
 
 ## How it works
 

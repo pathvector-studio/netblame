@@ -943,6 +943,8 @@ mod tests {
             quic: None,
             path: Some(healthy_path()),
             trace: None,
+            completeness: Completeness::default(),
+            stage_durations: Vec::new(),
         }
     }
 

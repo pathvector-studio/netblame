@@ -4,7 +4,7 @@
 //! module turns that data into text for the selected language. No other
 //! module may contain user-facing string literals.
 
-use crate::report::DnsOutcome;
+use crate::report::{DnsOutcome, TruncationReason};
 use crate::verdict::{Evidence, Finding, Headline};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -1168,6 +1168,40 @@ pub fn watch_runs_line(lang: Lang, runs: u32, ok: u32, ok_pct: f64) -> String {
     match lang {
         Lang::En => format!("runs: {runs} / ok: {ok} ({ok_pct:.0}%)"),
         Lang::Ja => format!("実行回数: {runs} / 正常: {ok} ({ok_pct:.0}%)"),
+    }
+}
+
+// ── Truncation (--max-time / Ctrl-C) ──────────────────────────────────────
+
+pub fn truncated_header_line(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "[TRUNCATED] diagnosis stopped early — results below are partial",
+        Lang::Ja => "【打ち切り】診断は途中で終了しました — 以下は部分的な結果です",
+    }
+}
+
+pub fn truncation_reason_line(lang: Lang, reason: TruncationReason) -> String {
+    match (lang, reason) {
+        (Lang::En, TruncationReason::MaxTimeExceeded) => {
+            "reason: --max-time deadline exceeded".to_string()
+        }
+        (Lang::En, TruncationReason::Interrupted) => "reason: interrupted (Ctrl-C)".to_string(),
+        (Lang::Ja, TruncationReason::MaxTimeExceeded) => "理由: --max-time の期限切れ".to_string(),
+        (Lang::Ja, TruncationReason::Interrupted) => "理由: 中断 (Ctrl-C)".to_string(),
+    }
+}
+
+pub fn stages_ran_line(lang: Lang, list: &str) -> String {
+    match lang {
+        Lang::En => format!("stages completed: {list}"),
+        Lang::Ja => format!("完了したステージ: {list}"),
+    }
+}
+
+pub fn stages_skipped_line(lang: Lang, list: &str) -> String {
+    match lang {
+        Lang::En => format!("stages skipped: {list}"),
+        Lang::Ja => format!("未実行のステージ: {list}"),
     }
 }
 

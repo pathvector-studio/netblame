@@ -265,6 +265,80 @@ pub enum TraceReport {
     Failed(String),
 }
 
+/// 実行された/スキップされたステージの名前 (JSON では小文字の識別子)。
+/// `--max-time` による打ち切りの報告と、ステージ別所要時間の両方で使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageName {
+    Env,
+    Dns,
+    Tcp,
+    Tls,
+    Http,
+    Quic,
+    Path,
+    Trace,
+}
+
+impl StageName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StageName::Env => "env",
+            StageName::Dns => "dns",
+            StageName::Tcp => "tcp",
+            StageName::Tls => "tls",
+            StageName::Http => "http",
+            StageName::Quic => "quic",
+            StageName::Path => "path",
+            StageName::Trace => "trace",
+        }
+    }
+}
+
+/// 1ステージぶんの所要時間 (ミリ秒)。今後のドッグフーディングで
+/// 「どのステージが時間を食っているか」を JSON から直接読めるようにする。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StageDuration {
+    pub stage: StageName,
+    pub ms: f64,
+}
+
+/// 診断の完了状況。`--max-time` (または Ctrl-C) による打ち切りがあったかどうか、
+/// および実行/未実行のステージ一覧を記録する。JSON にも `"complete"` として
+/// そのまま出す。
+#[derive(Debug, Clone, Serialize)]
+pub struct Completeness {
+    /// 全ステージを完走したか (途中終了なら false)
+    pub complete: bool,
+    /// 打ち切りの理由 (完走なら None)
+    pub truncated_reason: Option<TruncationReason>,
+    /// 実行された (完了した) ステージ
+    pub ran_stages: Vec<StageName>,
+    /// `--max-time` / 割り込みにより未実行だったステージ
+    pub skipped_stages: Vec<StageName>,
+}
+
+impl Default for Completeness {
+    fn default() -> Self {
+        Self {
+            complete: true,
+            truncated_reason: None,
+            ran_stages: Vec::new(),
+            skipped_stages: Vec::new(),
+        }
+    }
+}
+
+/// 打ち切りの理由
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationReason {
+    /// `--max-time` の全体デッドラインに到達した
+    MaxTimeExceeded,
+    /// Ctrl-C (SIGINT) を受信した
+    Interrupted,
+}
+
 /// 全ステージの結果を束ねた診断レポート
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -277,4 +351,8 @@ pub struct Report {
     pub quic: Option<QuicReport>,
     pub path: Option<PathReport>,
     pub trace: Option<TraceReport>,
+    /// 打ち切り (`--max-time` / Ctrl-C) の情報。通常完走時も常に埋める。
+    pub completeness: Completeness,
+    /// ステージ別所要時間 (計測できた分だけ、実行順)
+    pub stage_durations: Vec<StageDuration>,
 }

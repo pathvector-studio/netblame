@@ -2,6 +2,7 @@
 //! between the `netblame` CLI binary and the (feature-gated) `netblame-share`
 //! self-hostable report server.
 
+pub mod deadline;
 pub mod i18n;
 pub mod probe;
 pub mod report;

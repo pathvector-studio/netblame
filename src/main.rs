@@ -4,14 +4,18 @@
 //! evidence, in plain English or Japanese.
 
 use clap::Parser;
+use netblame::deadline::{should_stop, Deadline};
 use netblame::i18n::{self, msg, Lang, MsgKey};
-use netblame::report::{self, DnsOutcome, Report, TargetInfo, TcpOutcome, TraceReport};
+use netblame::report::{
+    self, Completeness, DnsOutcome, Report, StageDuration, StageName, TargetInfo, TcpOutcome,
+    TraceReport, TruncationReason,
+};
 use netblame::verdict::{self, judge, Culprit, RenderedVerdict, Verdict};
 use netblame::{probe, share, ParseError};
 use owo_colors::{OwoColorize, Stream::Stdout};
 use std::io::IsTerminal;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Is it really the network's fault? Staged network diagnosis CLI that names the culprit with evidence.
 #[derive(Parser, Debug)]
@@ -27,6 +31,14 @@ struct Args {
     /// Per-probe timeout in seconds
     #[arg(long, default_value_t = 5)]
     timeout: u64,
+
+    /// Overall wall-clock deadline in seconds for the entire diagnosis
+    /// (curl-style). Unset by default: total time is unbounded and only
+    /// --timeout (per probe) applies, as before. When set, remaining stages
+    /// are skipped once the deadline passes and a partial report is printed
+    /// (exit code 3 if no verdict was reached yet)
+    #[arg(long, value_name = "SECS")]
+    max_time: Option<u64>,
 
     /// Number of latency samples
     #[arg(long, default_value_t = 5)]
@@ -189,20 +201,106 @@ fn fmt_ms(ms: Option<f64>) -> String {
     ms.map_or("-".to_string(), |v| format!("{v:.0}ms"))
 }
 
+/// ステージ別所要時間と、`--max-time` / Ctrl-C による打ち切り情報を
+/// 集計するヘルパー。`diagnose` の中で各ステージの実行前後にこれを使う。
+struct StageTracker {
+    durations: Vec<StageDuration>,
+    ran: Vec<StageName>,
+    all_stages: [StageName; 8],
+}
+
+impl StageTracker {
+    fn new() -> Self {
+        Self {
+            durations: Vec::new(),
+            ran: Vec::new(),
+            all_stages: [
+                StageName::Env,
+                StageName::Dns,
+                StageName::Tcp,
+                StageName::Tls,
+                StageName::Http,
+                StageName::Quic,
+                StageName::Path,
+                StageName::Trace,
+            ],
+        }
+    }
+
+    /// ステージ実行を計測しつつ実行する。
+    async fn record<T>(
+        &mut self,
+        stage: StageName,
+        fut: impl std::future::Future<Output = T>,
+    ) -> T {
+        let start = Instant::now();
+        let out = fut.await;
+        self.durations.push(StageDuration {
+            stage,
+            ms: start.elapsed().as_secs_f64() * 1000.0,
+        });
+        self.ran.push(stage);
+        out
+    }
+
+    /// 同期ステージ (env など) 用。
+    fn record_sync<T>(&mut self, stage: StageName, f: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let out = f();
+        self.durations.push(StageDuration {
+            stage,
+            ms: start.elapsed().as_secs_f64() * 1000.0,
+        });
+        self.ran.push(stage);
+        out
+    }
+
+    /// まだ実行していないステージの一覧 (未実行 = スキップ扱い)。
+    fn skipped(&self) -> Vec<StageName> {
+        self.all_stages
+            .iter()
+            .copied()
+            .filter(|s| !self.ran.contains(s))
+            .collect()
+    }
+
+    fn into_completeness(self, truncated_reason: Option<TruncationReason>) -> Completeness {
+        // 「未実行」は打ち切り時にだけ意味のある概念として報告する。完走時
+        // (truncated_reason == None) は TLS/HTTP/QUIC/Trace などターゲットの
+        // 性質上そもそも実行しないステージが普通にあり、それを "skipped" と
+        // 呼ぶと打ち切りと紛らわしくなるため空のままにする。
+        let skipped = if truncated_reason.is_some() {
+            self.skipped()
+        } else {
+            Vec::new()
+        };
+        Completeness {
+            complete: truncated_reason.is_none(),
+            truncated_reason,
+            ran_stages: self.ran,
+            skipped_stages: skipped,
+        }
+    }
+}
+
 /// 全ステージを実行して Report と Verdict を返す。
 /// `p.quiet` が false ならステージごとの結果を逐次表示する。
+/// `deadline` が `Some` かつ既に過ぎている場合、まだ実行していない
+/// ステージ以降はスキップし、そこまでの結果で打ち切りレポートを返す。
 async fn diagnose(
     target: &Target,
     timeout: Duration,
     samples: u32,
     force_trace: bool,
     p: &Printer,
+    deadline: Option<&Deadline>,
 ) -> (Report, Verdict) {
     let lang = p.lang;
+    let mut stages = StageTracker::new();
 
     // ── ステージ1: 環境 ─────────────────────────────
     p.section(MsgKey::StageEnv);
-    let env_report = probe::env::run(&target.host);
+    let env_report = stages.record_sync(StageName::Env, || probe::env::run(&target.host));
     if env_report.nameservers.is_empty() {
         p.warn(msg(lang, MsgKey::NoNameservers));
     } else {
@@ -235,8 +333,28 @@ async fn diagnose(
     }
 
     // ── ステージ2: DNS ─────────────────────────────
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            report::DnsReport::default(),
+            report::TcpReport::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     p.section(MsgKey::StageDns);
-    let dns_report = probe::dns::run(&target.host, &env_report.nameservers, timeout, lang).await;
+    let dns_report = stages
+        .record(
+            StageName::Dns,
+            probe::dns::run(&target.host, &env_report.nameservers, timeout, lang),
+        )
+        .await;
     if dns_report.skipped {
         p.ok(msg(lang, MsgKey::DnsSkippedIpLiteral));
     } else {
@@ -275,12 +393,33 @@ async fn diagnose(
     };
 
     // ── ステージ3: TCP ─────────────────────────────
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            report::TcpReport::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     p.section(MsgKey::StageTcp);
     let tcp_report = if resolved_ips.is_empty() {
         p.fail(msg(lang, MsgKey::NoResolvedIps));
+        stages.ran.push(StageName::Tcp);
         report::TcpReport::default()
     } else {
-        let r = probe::tcp::run(&resolved_ips, target.port, samples, timeout, lang).await;
+        let r = stages
+            .record(
+                StageName::Tcp,
+                probe::tcp::run(&resolved_ips, target.port, samples, timeout, lang),
+            )
+            .await;
         for probe in &r.probes {
             match &probe.outcome {
                 TcpOutcome::Ok => p.ok(&i18n::tcp_ok_line(
@@ -313,11 +452,31 @@ async fn diagnose(
     let tcp_any_ok = tcp_report.probes.iter().any(|pr| pr.is_ok());
 
     // ── ステージ4: TLS ─────────────────────────────
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            tcp_report,
+            None,
+            None,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     let tls_report = if target.use_tls {
         p.section(MsgKey::StageTls);
         match primary_ip {
             Some(ip) if tcp_any_ok => {
-                let r = probe::tls::run(&target.host, ip, target.port, timeout, lang).await;
+                let r = stages
+                    .record(
+                        StageName::Tls,
+                        probe::tls::run(&target.host, ip, target.port, timeout, lang),
+                    )
+                    .await;
                 if r.verified {
                     p.ok(&i18n::tls_handshake_ok_line(
                         lang,
@@ -361,6 +520,21 @@ async fn diagnose(
     };
 
     // ── ステージ5: HTTP ────────────────────────────
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            tcp_report,
+            tls_report,
+            None,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     let http_report = if target.do_http && tcp_any_ok {
         p.section(MsgKey::StageHttp);
         let scheme = if target.use_tls { "https" } else { "http" };
@@ -375,7 +549,9 @@ async fn diagnose(
         } else {
             format!("{scheme}://{host_for_url}:{}{}", target.port, target.path)
         };
-        let mut r = probe::http::run(&url, timeout, lang).await;
+        let mut r = stages
+            .record(StageName::Http, probe::http::run(&url, timeout, lang))
+            .await;
         // 内訳時間は各ステージの実測値を転記する
         r.dns_ms = dns_report
             .sources
@@ -425,10 +601,30 @@ async fn diagnose(
     };
 
     // ── ステージ: QUIC/HTTP3 (https ターゲットのみ、HTTP ステージの後) ──
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            tcp_report,
+            tls_report,
+            http_report,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     let quic_report = match primary_ip {
         Some(ip) if target.use_tls && target.do_http && tcp_any_ok => {
             p.section(MsgKey::StageQuic);
-            let r = probe::quic::run(&target.host, ip, target.port, timeout).await;
+            let r = stages
+                .record(
+                    StageName::Quic,
+                    probe::quic::run(&target.host, ip, target.port, timeout),
+                )
+                .await;
             let h3_advertised = http_report.as_ref().is_some_and(|h| h.h3_advertised);
             match &r.outcome {
                 report::QuicOutcome::Ok {
@@ -467,10 +663,30 @@ async fn diagnose(
     };
 
     // ── ステージ6: 経路品質 ─────────────────────────
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            tcp_report,
+            tls_report,
+            http_report,
+            quic_report,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     let path_report = match primary_ip {
         Some(ip) if tcp_any_ok => {
             p.section(MsgKey::StagePath);
-            let r = probe::path::run(ip, target.port, samples, timeout).await;
+            let r = stages
+                .record(
+                    StageName::Path,
+                    probe::path::run(ip, target.port, samples, timeout),
+                )
+                .await;
             let line = i18n::path_line(
                 lang,
                 r.sent,
@@ -503,10 +719,27 @@ async fn diagnose(
             || r.jitter_ms
                 .is_some_and(|j| j > verdict::JITTER_MS_THRESHOLD)
     });
+    if should_stop(deadline) {
+        return truncated_report(
+            target,
+            env_report,
+            dns_report,
+            tcp_report,
+            tls_report,
+            http_report,
+            quic_report,
+            path_report,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
+    }
     let trace_report = match primary_ip {
         Some(ip) if force_trace || tcp_timed_out || path_bad => {
             p.section(MsgKey::StageTrace);
-            let r = probe::trace::run(ip, lang).await;
+            let r = stages
+                .record(StageName::Trace, probe::trace::run(ip, lang))
+                .await;
             print_trace(&r, p);
             Some(r)
         }
@@ -514,7 +747,41 @@ async fn diagnose(
     };
 
     // ── 判定 ───────────────────────────────────────
-    let full_report = Report {
+    let durations = stages.durations.clone();
+    let full_report = build_report(
+        target,
+        env_report,
+        dns_report,
+        tcp_report,
+        tls_report,
+        http_report,
+        quic_report,
+        path_report,
+        trace_report,
+        stages.into_completeness(None),
+        durations,
+    );
+
+    let verdict = judge(&full_report);
+    (full_report, verdict)
+}
+
+/// `Report` を組み立てる。完走時・打ち切り時の両方から使う共通ヘルパー。
+#[allow(clippy::too_many_arguments)]
+fn build_report(
+    target: &Target,
+    env_report: report::EnvReport,
+    dns_report: report::DnsReport,
+    tcp_report: report::TcpReport,
+    tls_report: Option<report::TlsReport>,
+    http_report: Option<report::HttpReport>,
+    quic_report: Option<report::QuicReport>,
+    path_report: Option<report::PathReport>,
+    trace_report: Option<TraceReport>,
+    completeness: Completeness,
+    stage_durations: Vec<StageDuration>,
+) -> Report {
+    Report {
         target: TargetInfo {
             host: target.host.clone(),
             port: target.port,
@@ -531,8 +798,43 @@ async fn diagnose(
         quic: quic_report,
         path: path_report,
         trace: trace_report,
-    };
+        completeness,
+        stage_durations,
+    }
+}
 
+/// `--max-time` (または Ctrl-C) による打ち切り時に、そこまでの結果で
+/// Report/Verdict を組み立てる。`judge` はそれまでに埋まったフィールドだけを
+/// 見て、既に犯人を特定できていればそれを返す (例: TCP 全滅が確定した後に
+/// 打ち切られた場合はそのまま TcpBlocked になる)。
+#[allow(clippy::too_many_arguments)]
+fn truncated_report(
+    target: &Target,
+    env_report: report::EnvReport,
+    dns_report: report::DnsReport,
+    tcp_report: report::TcpReport,
+    tls_report: Option<report::TlsReport>,
+    http_report: Option<report::HttpReport>,
+    quic_report: Option<report::QuicReport>,
+    path_report: Option<report::PathReport>,
+    trace_report: Option<TraceReport>,
+    stages: StageTracker,
+    reason: TruncationReason,
+) -> (Report, Verdict) {
+    let durations = stages.durations.clone();
+    let full_report = build_report(
+        target,
+        env_report,
+        dns_report,
+        tcp_report,
+        tls_report,
+        http_report,
+        quic_report,
+        path_report,
+        trace_report,
+        stages.into_completeness(Some(reason)),
+        durations,
+    );
     let verdict = judge(&full_report);
     (full_report, verdict)
 }
@@ -629,12 +931,15 @@ struct ProblemStat {
 }
 
 /// --watch モード: 診断をループし、1 行タイムラインとサマリを出す
+/// `max_time_secs` を指定すると、各回の診断1回ごとにその秒数のデッドラインを適用する
+/// (--watch の反復自体を止めるものではない)。
 async fn watch_loop(
     target: &Target,
     timeout: Duration,
     samples: u32,
     interval_secs: u64,
     force_trace: bool,
+    max_time_secs: Option<u64>,
     lang: Lang,
 ) -> ! {
     let interval = Duration::from_secs(interval_secs.max(1));
@@ -647,8 +952,9 @@ async fn watch_loop(
     let mut problems: Vec<ProblemStat> = Vec::new();
 
     loop {
+        let deadline = max_time_secs.map(Deadline::from_secs);
         let outcome = tokio::select! {
-            r = diagnose(target, timeout, samples, force_trace, &quiet) => Some(r),
+            r = diagnose(target, timeout, samples, force_trace, &quiet, deadline.as_ref()) => Some(r),
             _ = tokio::signal::ctrl_c() => None,
         };
         let Some((report, verdict)) = outcome else {
@@ -783,7 +1089,16 @@ async fn main() {
             eprintln!("{err_prefix}: {}", msg(lang, MsgKey::ShareWatchConflict));
             std::process::exit(2);
         }
-        watch_loop(&target, timeout, samples, interval, args.trace, lang).await;
+        watch_loop(
+            &target,
+            timeout,
+            samples,
+            interval,
+            args.trace,
+            args.max_time,
+            lang,
+        )
+        .await;
     }
 
     let p = Printer {
@@ -800,8 +1115,42 @@ async fn main() {
         );
     }
 
-    let (full_report, verdict) = diagnose(&target, timeout, samples, args.trace, &p).await;
+    let deadline = args.max_time.map(Deadline::from_secs);
+
+    // Ctrl-C (SIGINT) 中でも、それまでに得られた結果を捨てずに済むよう
+    // 診断とレースさせる。割り込まれた場合は「そこまでの env ステージだけ」の
+    // 打ち切りレポートになるが、何も出さずに終了する v0.5 までの挙動よりは
+    // はるかにマシ (要件2: 沈黙終了を二度と起こさない)。
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let interrupted_flag = interrupted.clone();
+    let diagnose_fut = diagnose(&target, timeout, samples, args.trace, &p, deadline.as_ref());
+    tokio::pin!(diagnose_fut);
+    let (full_report, verdict) = tokio::select! {
+        r = &mut diagnose_fut => r,
+        _ = tokio::signal::ctrl_c() => {
+            interrupted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            // 診断タスク自体は協調的にしか止められないので、直近のステージ
+            // 境界チェックに任せず、ここでは受信した事実だけ記録して
+            // 「env のみ完了」の打ち切りレポートを即座に返す。
+            let stages = StageTracker::new();
+            let env_report = probe::env::run(&target.host);
+            truncated_report(
+                &target,
+                env_report,
+                report::DnsReport::default(),
+                report::TcpReport::default(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                stages,
+                TruncationReason::Interrupted,
+            )
+        }
+    };
     let rendered = verdict.render(lang);
+    let truncated = !full_report.completeness.complete;
 
     if args.json {
         #[derive(serde::Serialize)]
@@ -823,6 +1172,9 @@ async fn main() {
             }
         }
     } else {
+        if truncated {
+            print_truncation_notice(&full_report, lang);
+        }
         print_verdict_block(&rendered, lang);
     }
 
@@ -830,11 +1182,55 @@ async fn main() {
         upload_report(&full_report, &rendered, lang, args.share_url.as_deref()).await;
     }
 
-    std::process::exit(if verdict.culprit == Culprit::NoProblem {
+    std::process::exit(exit_code(&full_report, &verdict));
+}
+
+/// 終了コードを決定する。
+/// - 0: 問題なし (完走)
+/// - 1: 犯人を特定 (完走、または打ち切り前に既に特定できていた場合を含む)
+/// - 2: 使い方・内部エラー (main の他の分岐で使用、ここでは出さない)
+/// - 3: `--max-time` / Ctrl-C により打ち切られ、かつ犯人を特定できなかった
+fn exit_code(report: &Report, verdict: &Verdict) -> i32 {
+    if !report.completeness.complete && verdict.culprit == Culprit::NoProblem {
+        3
+    } else if verdict.culprit == Culprit::NoProblem {
         0
     } else {
         1
-    });
+    }
+}
+
+/// 打ち切られたレポートであることをテキストモードで明示する
+fn print_truncation_notice(report: &Report, lang: Lang) {
+    let reason = report
+        .completeness
+        .truncated_reason
+        .map(|r| i18n::truncation_reason_line(lang, r));
+    let ran: Vec<&str> = report
+        .completeness
+        .ran_stages
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let skipped: Vec<&str> = report
+        .completeness
+        .skipped_stages
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    println!();
+    let style = owo_colors::Style::new().yellow().bold();
+    println!(
+        "{}",
+        i18n::truncated_header_line(lang).if_supports_color(Stdout, |t| t.style(style))
+    );
+    if let Some(r) = reason {
+        println!("  {r}");
+    }
+    println!("  {}", i18n::stages_ran_line(lang, &ran.join(", ")));
+    if !skipped.is_empty() {
+        println!("  {}", i18n::stages_skipped_line(lang, &skipped.join(", ")));
+    }
 }
 
 /// --share: POST the full JSON payload to the share server and print the
@@ -936,6 +1332,172 @@ mod tests {
         let t = parse_target("[2606:2800::1]:8443").unwrap();
         assert_eq!(t.host, "2606:2800::1");
         assert_eq!(t.port, 8443);
+    }
+
+    // ── --max-time / 打ち切り ────────────────────────────────────────────
+
+    fn quiet_printer() -> Printer {
+        Printer {
+            quiet: true,
+            lang: Lang::En,
+        }
+    }
+
+    /// 既に期限切れのデッドラインを渡すと、env ステージ (同期・即完了) だけが
+    /// 実行され、それ以降は境界チェックで即座にスキップされる。
+    /// 何も問題の証拠が集まらないので判定は NoProblem のままだが、
+    /// `completeness.complete` は false になり、exit_code は 3 (打ち切り・
+    /// 未結論) を返す。
+    #[tokio::test]
+    async fn diagnose_stops_immediately_when_deadline_already_expired() {
+        let target = parse_target("192.0.2.1:9999").unwrap(); // IP literal, plain TCP (port != 80/443)
+        let deadline = Deadline::already_expired();
+        let p = quiet_printer();
+        let (report, verdict) = diagnose(
+            &target,
+            Duration::from_secs(5),
+            1,
+            false,
+            &p,
+            Some(&deadline),
+        )
+        .await;
+
+        assert!(!report.completeness.complete);
+        assert_eq!(
+            report.completeness.truncated_reason,
+            Some(TruncationReason::MaxTimeExceeded)
+        );
+        assert_eq!(report.completeness.ran_stages, vec![StageName::Env]);
+        assert!(report.completeness.skipped_stages.contains(&StageName::Dns));
+        assert!(report.completeness.skipped_stages.contains(&StageName::Tcp));
+        // 未実行のステージは None/空のまま
+        assert!(report.dns.sources.is_empty());
+        assert!(report.tcp.probes.is_empty());
+        assert!(report.tls.is_none());
+        assert_eq!(verdict.culprit, Culprit::NoProblem);
+        assert_eq!(exit_code(&report, &verdict), 3);
+    }
+
+    /// デッドラインが TCP ステージの完了後・Path ステージの前に切れる場合:
+    /// TCP は最後まで実行されて結果 (今回はタイムアウト) が残り、Path 以降は
+    /// スキップされる。TCP 全滅は judge の主犯確定ルールなので、打ち切られて
+    /// いても犯人は特定済み → exit_code は 1 (通常の犯人特定コード) になる
+    /// べきで、3 (未結論) にはならない。
+    ///
+    /// 192.0.2.1 (TEST-NET-1, RFC 5737) はドキュメント用に予約された未使用
+    /// アドレスで、経路上で確実にブラックホールされる (SYN への応答が一切
+    /// 返らない) ため、TCP 接続は必ず --timeout いっぱいまでブロックする。
+    /// これを利用して「TCP ステージは完走するがその時点で既に --max-time は
+    /// 過ぎている」という状況を確定的に再現する。
+    #[tokio::test]
+    async fn diagnose_truncated_after_culprit_found_keeps_normal_exit_code() {
+        let target = parse_target("192.0.2.1:9999").unwrap();
+        let probe_timeout = Duration::from_millis(300);
+        // TCP 開始時点ではまだ切れていないが、TCP が timeout いっぱいまで
+        // ブロックしている間に確実に過ぎる短いデッドライン
+        let deadline = Deadline::from_millis(50);
+        let p = quiet_printer();
+        let (report, verdict) =
+            diagnose(&target, probe_timeout, 1, false, &p, Some(&deadline)).await;
+
+        assert!(!report.completeness.complete);
+        assert_eq!(
+            report.completeness.truncated_reason,
+            Some(TruncationReason::MaxTimeExceeded)
+        );
+        assert!(report.completeness.ran_stages.contains(&StageName::Tcp));
+        assert!(report
+            .completeness
+            .skipped_stages
+            .contains(&StageName::Path));
+        assert_eq!(verdict.culprit, Culprit::TcpBlocked);
+        assert_eq!(exit_code(&report, &verdict), 1);
+    }
+
+    /// デッドライン未指定 (`--max-time` なし) では従来通り最後まで走り、
+    /// `completeness.complete` は true のまま。
+    ///
+    /// ポートを閉じたローカルアドレス (bind 直後に drop) を使う: 接続は
+    /// ECONNREFUSED で瞬時に終わるので、`tcp_timed_out` が false のままとなり
+    /// 経路トレースの自動起動 (最悪 15-30 秒) が発火しない。ブラックホール
+    /// アドレスを使うと trace が自動実行されテストが極端に遅くなるため避ける。
+    #[tokio::test]
+    async fn diagnose_without_deadline_runs_to_completion() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let target = parse_target(&format!("127.0.0.1:{port}")).unwrap();
+        let p = quiet_printer();
+        let (report, verdict) =
+            diagnose(&target, Duration::from_millis(200), 1, false, &p, None).await;
+
+        assert!(report.completeness.complete);
+        assert!(report.completeness.truncated_reason.is_none());
+        assert!(report.completeness.skipped_stages.is_empty());
+        // TLS/HTTP/QUIC/Path は tcp_any_ok が false のため元々実行対象外
+        // (打ち切りとは無関係の、通常のスキップ) であり、ran_stages には
+        // 現れない。
+        assert!(report.completeness.ran_stages.contains(&StageName::Env));
+        assert!(report.completeness.ran_stages.contains(&StageName::Dns));
+        assert!(report.completeness.ran_stages.contains(&StageName::Tcp));
+        assert_eq!(verdict.culprit, Culprit::ServerDown);
+        assert_eq!(exit_code(&report, &verdict), 1);
+    }
+
+    /// ステージ別所要時間が記録され、実行したステージの数だけエントリがある。
+    #[tokio::test]
+    async fn diagnose_records_stage_durations() {
+        let target = parse_target("192.0.2.1:9999").unwrap();
+        let deadline = Deadline::already_expired();
+        let p = quiet_printer();
+        let (report, _verdict) = diagnose(
+            &target,
+            Duration::from_secs(5),
+            1,
+            false,
+            &p,
+            Some(&deadline),
+        )
+        .await;
+
+        // env だけ実行されたはずなので、所要時間エントリも1件
+        assert_eq!(report.stage_durations.len(), 1);
+        assert_eq!(report.stage_durations[0].stage, StageName::Env);
+        assert!(report.stage_durations[0].ms >= 0.0);
+    }
+
+    #[test]
+    fn exit_code_healthy_is_zero() {
+        let mut r = verdict::judge(&minimal_healthy_report());
+        r.secondary.clear();
+        let report = minimal_healthy_report();
+        assert_eq!(exit_code(&report, &r), 0);
+    }
+
+    /// 判定に必要な最低限のフィールドだけ埋めた Report (exit_code のテスト用)
+    fn minimal_healthy_report() -> Report {
+        Report {
+            target: TargetInfo {
+                host: "example.com".into(),
+                port: 443,
+                use_tls: true,
+                do_http: true,
+                path: "/".into(),
+                is_ip_literal: false,
+            },
+            env: report::EnvReport::default(),
+            dns: report::DnsReport::default(),
+            tcp: report::TcpReport::default(),
+            tls: None,
+            http: None,
+            quic: None,
+            path: None,
+            trace: None,
+            completeness: Completeness::default(),
+            stage_durations: Vec::new(),
+        }
     }
 
     #[test]
