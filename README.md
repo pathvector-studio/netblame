@@ -6,15 +6,65 @@ English | [日本語](README.ja.md)
 
 "The internet is slow", "the site won't load" — but is the culprit your router, DNS, the path in between, or the server itself? `netblame` is a single-binary CLI: give it one URL or host, it runs a staged diagnosis and **names the most likely culprit in plain language, with evidence**.
 
-```
-$ netblame https://example.com
-...
-[VERDICT] No problem found. The path to this destination is healthy right now
-```
-
 Output is available in English and Japanese (`--lang en|ja`, auto-detected from your locale).
 
 > ⚠️ **Prototype.** Verdict thresholds are heuristics and may misjudge unusual network setups — feedback welcome. Verified on Linux (macOS best-effort, Windows not yet supported).
+
+## What you get
+
+One command checks DNS, TCP, TLS, HTTP, QUIC and the network path in order, then **names a single culprit — with evidence and a next step**. Typical verdicts:
+
+These are the verdict blocks netblame prints for each scenario (stage-by-stage output omitted). The hostnames, addresses and timings in the examples are illustrative.
+
+**The page is just slow** — the path is fine, the server is not:
+
+```
+$ netblame https://example.com
+...
+[VERDICT] The server is slow to respond. The network is fine
+[EVIDENCE]
+  • TCP connects in 12ms — the path is healthy
+  • yet the first byte of the response (TTFB) takes 4200ms
+  • The slow part is server-side processing (application/database)
+[NEXT STEP] Tweaking your line or router will not help. Contact the server administrator, or retry later
+```
+
+**Your router's DNS is down** — public DNS still resolves the name:
+
+```
+$ netblame https://example.com
+...
+[VERDICT] Your local DNS resolver is not working
+[EVIDENCE]
+  • Public DNS (1.1.1.1 / 8.8.8.8) resolves the name fine
+  • system resolver failed (timeout)
+  • local 192.168.1.1 failed (timeout)
+[NEXT STEP] Restart your router, or switch your DNS servers to 1.1.1.1 / 8.8.8.8 as a workaround
+```
+
+**A corporate proxy rewrites your TLS** — the certificate issuer gives it away:
+
+```
+$ netblame https://example.com
+...
+[VERDICT] Your TLS traffic is most likely being intercepted in transit
+[EVIDENCE]
+  • presented certificate issuer: CN=Zscaler Intermediate Root CA
+  • The issuer looks like a middlebox (firewall/proxy product), not a real certificate authority
+[NEXT STEP] On a corporate network this means SSL inspection is on. Ask your administrator, or install the corporate CA certificate
+```
+
+**Big packets vanish on a VPN/tunnel** — a path MTU black hole:
+
+```
+$ netblame https://example.com
+...
+[VERDICT] Path MTU is restricted and PMTUD is broken — large packets vanish silently (black hole)
+[EVIDENCE]
+  • path MTU is 1280 bytes, yet oversized DF packets trigger no ICMP notification (PMTUD black hole)
+  • TCP connects fine — the path itself is healthy
+[NEXT STEP] Check the MTU setting on your VPN/tunnel, and enable MSS clamping on the router. Lowering the interface MTU to the detected path MTU is a quick workaround
+```
 
 ## Install
 
