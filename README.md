@@ -18,9 +18,36 @@ Output is available in English and Japanese (`--lang en|ja`, auto-detected from 
 
 ## Install
 
-### Binary (recommended)
+### Prebuilt binary (recommended)
 
-Download a Linux/macOS binary from [Releases](https://github.com/pathvector-studio/netblame/releases) and put it on your PATH.
+Prebuilt binaries are attached to each [release](https://github.com/pathvector-studio/netblame/releases). The asset names embed the version, so set `VERSION` to the release you want (latest: v0.6.0) and pick your platform:
+
+```bash
+VERSION=v0.6.0
+
+# Linux x86_64
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-x86_64-unknown-linux-musl.tar.gz | tar xz
+
+# Linux aarch64
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-aarch64-unknown-linux-musl.tar.gz | tar xz
+
+# macOS Apple Silicon
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-aarch64-apple-darwin.tar.gz | tar xz
+
+# macOS Intel
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-x86_64-apple-darwin.tar.gz | tar xz
+
+# then put it on your PATH
+sudo mv netblame /usr/local/bin/
+```
+
+### With Cargo
+
+Requires Rust 1.85+.
+
+```bash
+cargo install --git https://github.com/pathvector-studio/netblame --locked
+```
 
 ### From source
 
@@ -31,6 +58,12 @@ git clone https://github.com/pathvector-studio/netblame.git
 cd netblame
 cargo build --release
 # binary at target/release/netblame
+```
+
+Verify the install:
+
+```bash
+netblame --version
 ```
 
 ## Usage
