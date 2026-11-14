@@ -52,10 +52,10 @@ $ netblame https://example.com
 【次の一手】 社内ネットワークなら SSL インスペクションが有効です。管理者に確認するか、社の CA 証明書を導入してください
 ```
 
-**VPN/トンネルで大きいパケットだけ消える** — 経路 MTU のブラックホール:
+**VPN/トンネルで大きいパケットだけ消える** — 経路 MTU のブラックホール(`--trace` が必要。経路トレースを使うため Linux のみ):
 
 ```
-$ netblame https://example.com
+$ netblame --trace https://example.com
 ...
 【判定】 経路 MTU が制限されているのに PMTUD が機能していません — 大きいパケットが黙って消えます (ブラックホール)
 【根拠】

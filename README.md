@@ -54,10 +54,10 @@ $ netblame https://example.com
 [NEXT STEP] On a corporate network this means SSL inspection is on. Ask your administrator, or install the corporate CA certificate
 ```
 
-**Big packets vanish on a VPN/tunnel** — a path MTU black hole:
+**Big packets vanish on a VPN/tunnel** — a path MTU black hole (needs `--trace`; Linux only, since it uses the path trace):
 
 ```
-$ netblame https://example.com
+$ netblame --trace https://example.com
 ...
 [VERDICT] Path MTU is restricted and PMTUD is broken — large packets vanish silently (black hole)
 [EVIDENCE]
