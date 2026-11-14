@@ -16,9 +16,36 @@ $ netblame https://example.com
 
 ## インストール
 
-### バイナリ (推奨)
+### ビルド済みバイナリ (推奨)
 
-[Releases](https://github.com/pathvector-studio/netblame/releases) から Linux / macOS のバイナリをダウンロードして PATH に置いてください。
+ビルド済みバイナリは各 [Release](https://github.com/pathvector-studio/netblame/releases) に添付されています。アセット名にバージョンが含まれるため、`VERSION` に使いたいリリースを設定し、お使いのプラットフォームのコマンドを実行してください (最新: v0.6.0)。
+
+```bash
+VERSION=v0.6.0
+
+# Linux x86_64
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-x86_64-unknown-linux-musl.tar.gz | tar xz
+
+# Linux aarch64
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-aarch64-unknown-linux-musl.tar.gz | tar xz
+
+# macOS Apple Silicon
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-aarch64-apple-darwin.tar.gz | tar xz
+
+# macOS Intel
+curl -L https://github.com/pathvector-studio/netblame/releases/download/$VERSION/netblame-$VERSION-x86_64-apple-darwin.tar.gz | tar xz
+
+# PATH の通った場所に置く
+sudo mv netblame /usr/local/bin/
+```
+
+### Cargo で
+
+Rust 1.85+ が必要です。
+
+```bash
+cargo install --git https://github.com/pathvector-studio/netblame --locked
+```
 
 ### ソースから
 
@@ -29,6 +56,12 @@ git clone https://github.com/pathvector-studio/netblame.git
 cd netblame
 cargo build --release
 # バイナリは target/release/netblame
+```
+
+インストールの確認:
+
+```bash
+netblame --version
 ```
 
 ## 使い方
