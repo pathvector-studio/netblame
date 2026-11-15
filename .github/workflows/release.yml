@@ -43,6 +43,7 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf netblame-${{ github.ref_name }}-${{ matrix.target }}.tar.gz netblame
+          cp netblame-${{ github.ref_name }}-${{ matrix.target }}.tar.gz netblame-${{ matrix.target }}.tar.gz
       - uses: softprops/action-gh-release@v3
         with:
           files: target/${{ matrix.target }}/release/netblame-*.tar.gz
