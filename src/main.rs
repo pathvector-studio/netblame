@@ -1385,21 +1385,55 @@ mod tests {
     /// いても犯人は特定済み → exit_code は 1 (通常の犯人特定コード) になる
     /// べきで、3 (未結論) にはならない。
     ///
-    /// 192.0.2.1 (TEST-NET-1, RFC 5737) はドキュメント用に予約された未使用
-    /// アドレスで、経路上で確実にブラックホールされる (SYN への応答が一切
-    /// 返らない) ため、TCP 接続は必ず --timeout いっぱいまでブロックする。
-    /// これを利用して「TCP ステージは完走するがその時点で既に --max-time は
-    /// 過ぎている」という状況を確定的に再現する。
-    #[tokio::test]
-    async fn diagnose_truncated_after_culprit_found_keeps_normal_exit_code() {
+    /// 以前は 192.0.2.1 (TEST-NET-1) への実接続がブラックホールされて必ず
+    /// タイムアウトまでブロックすることに頼り、短い `--max-time` を TCP 中に
+    /// 切らせていた。しかし環境によっては接続が即座に ENETUNREACH などで
+    /// 失敗する (サンドボックスやプロキシ環境) ため、デッドラインが切れる前に
+    /// 最後まで走ってしまい不安定だった。実ネットワークに依存しないよう、
+    /// 「Env/Dns/Tcp が実行済みで全プローブがタイムアウト、Path 以降は未実行」
+    /// という状態を直接組み立てて `truncated_report` に渡して検証する。
+    #[test]
+    fn diagnose_truncated_after_culprit_found_keeps_normal_exit_code() {
         let target = parse_target("192.0.2.1:9999").unwrap();
-        let probe_timeout = Duration::from_millis(300);
-        // TCP 開始時点ではまだ切れていないが、TCP が timeout いっぱいまで
-        // ブロックしている間に確実に過ぎる短いデッドライン
-        let deadline = Deadline::from_millis(50);
-        let p = quiet_printer();
-        let (report, verdict) =
-            diagnose(&target, probe_timeout, 1, false, &p, Some(&deadline)).await;
+
+        // Env / Dns / Tcp まで実行済み、Path 以降は未実行
+        let mut stages = StageTracker::new();
+        stages.ran.push(StageName::Env);
+        stages.ran.push(StageName::Dns);
+        stages.ran.push(StageName::Tcp);
+
+        // IP リテラル指定なので DNS はスキップ扱い
+        let dns_report = report::DnsReport {
+            sources: Vec::new(),
+            skipped: true,
+        };
+        // 全プローブがタイムアウト (成功 0)
+        let tcp_report = report::TcpReport {
+            probes: vec![report::TcpProbe {
+                ip: "192.0.2.1".parse().unwrap(),
+                port: 9999,
+                samples: 1,
+                successes: 0,
+                outcome: report::TcpOutcome::Timeout,
+                min_ms: None,
+                avg_ms: None,
+                max_ms: None,
+            }],
+        };
+
+        let (report, verdict) = truncated_report(
+            &target,
+            report::EnvReport::default(),
+            dns_report,
+            tcp_report,
+            None,
+            None,
+            None,
+            None,
+            None,
+            stages,
+            TruncationReason::MaxTimeExceeded,
+        );
 
         assert!(!report.completeness.complete);
         assert_eq!(
