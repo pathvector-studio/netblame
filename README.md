@@ -146,6 +146,8 @@ netblame <target> [flags]
 
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` before any verdict was reached (if a culprit was already identified when the deadline hit, the normal culprit exit code is kept)
 
+**Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
+
 **Per-stage timings**: the JSON report always includes `report.stage_durations` (milliseconds per stage), so you can see exactly where a slow diagnosis spent its time — e.g. the QUIC probe waiting out its full timeout against a host with no HTTP/3.
 
 ## How it works
