@@ -144,7 +144,7 @@ netblame <target> [flags]
 
 **QUIC/HTTP3 probe**: the QUIC probe stage runs automatically (no flag needed) for `https` targets only, right after the HTTP stage. It is cross-platform (Linux and macOS).
 
-**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached (if a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and always gives `3`). In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`)
+**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached (if a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and gives `3`; exceptions: with `--json`, a JSON serialization failure exits `2`, and SIGTERM or a panic is not handled as Ctrl-C, so the process dies by the signal (e.g. 143 in a shell) or exits `101`). In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`)
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
 

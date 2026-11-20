@@ -13,7 +13,7 @@ netblame is a plain CLI that reports its result through its **exit code** and, w
 | `0` | No problem (the verdict is `no_problem`). Secondary notes alone do not change this. |
 | `1` | A culprit was identified. This includes `name_does_not_exist` (NXDOMAIN) and `server_down`; every verdict other than `no_problem` is `1`. |
 | `2` | Usage or internal error (e.g. unparseable target, `--json` combined with `--watch`, JSON serialization failure). |
-| `3` | The run was cut short (`--max-time` expired, or Ctrl-C/SIGINT) **before any culprit was identified**. If a culprit was already found when `--max-time` expired, the exit code is `1`. Ctrl-C discards partial results and always exits `3`. `--watch` is the exception (see below). |
+| `3` | The run was cut short (`--max-time` expired, or Ctrl-C/SIGINT) **before any culprit was identified**. If a culprit was already found when `--max-time` expired, the exit code is `1`. Ctrl-C discards partial results and exits `3` (except that with `--json`, a JSON serialization failure exits `2`; SIGTERM and panics are not treated as Ctrl-C: the process dies by the signal, e.g. 143 in a shell, or exits `101`). `--watch` is the exception (see below). |
 
 `--share` never changes the exit code; an upload failure only prints a warning to stderr.
 
