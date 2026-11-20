@@ -839,6 +839,30 @@ fn truncated_report(
     (full_report, verdict)
 }
 
+/// Ctrl-C (SIGINT) を受けたときの打ち切りレポートを組み立てる。
+///
+/// 診断タスクは協調的にしか止められないため、実行中・実行済みの env 以外の
+/// ステージ結果はここでは捨てる。env だけはローカルの設定読み取りで即座に
+/// 終わる (ネットワークに依存しない) ので改めて実行し、実行済みステージとして
+/// 記録する。
+fn interrupted_report(target: &Target) -> (Report, Verdict) {
+    let mut stages = StageTracker::new();
+    let env_report = stages.record_sync(StageName::Env, || probe::env::run(&target.host));
+    truncated_report(
+        target,
+        env_report,
+        report::DnsReport::default(),
+        report::TcpReport::default(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        stages,
+        TruncationReason::Interrupted,
+    )
+}
+
 /// 経路トレースステージの結果を表示する
 fn print_trace(r: &TraceReport, p: &Printer) {
     let lang = p.lang;
@@ -1117,10 +1141,10 @@ async fn main() {
 
     let deadline = args.max_time.map(Deadline::from_secs);
 
-    // Ctrl-C (SIGINT) 中でも、それまでに得られた結果を捨てずに済むよう
-    // 診断とレースさせる。割り込まれた場合は「そこまでの env ステージだけ」の
-    // 打ち切りレポートになるが、何も出さずに終了する v0.5 までの挙動よりは
-    // はるかにマシ (要件2: 沈黙終了を二度と起こさない)。
+    // Ctrl-C (SIGINT) を受けても沈黙終了しないよう、診断とレースさせる。
+    // 割り込まれた場合は、実行中・実行済みの env 以外のステージ結果は捨て、
+    // env のみ実行済みの打ち切りレポートを返す。何も出さずに終了する v0.5 までの
+    // 挙動よりはマシ (要件2: 沈黙終了を二度と起こさない)。
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let interrupted_flag = interrupted.clone();
     let diagnose_fut = diagnose(&target, timeout, samples, args.trace, &p, deadline.as_ref());
@@ -1130,23 +1154,8 @@ async fn main() {
         _ = tokio::signal::ctrl_c() => {
             interrupted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             // 診断タスク自体は協調的にしか止められないので、直近のステージ
-            // 境界チェックに任せず、ここでは受信した事実だけ記録して
-            // 「env のみ完了」の打ち切りレポートを即座に返す。
-            let stages = StageTracker::new();
-            let env_report = probe::env::run(&target.host);
-            truncated_report(
-                &target,
-                env_report,
-                report::DnsReport::default(),
-                report::TcpReport::default(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                stages,
-                TruncationReason::Interrupted,
-            )
+            // 境界チェックには任せず、受信した事実だけ記録して即座に返す。
+            interrupted_report(&target)
         }
     };
     let rendered = verdict.render(lang);
@@ -1377,6 +1386,29 @@ mod tests {
         assert!(report.tls.is_none());
         assert_eq!(verdict.culprit, Culprit::NoProblem);
         assert_eq!(exit_code(&report, &verdict), 3);
+    }
+
+    /// Ctrl-C による打ち切りレポート: env だけが実行済みステージとして記録され、
+    /// それ以外 (Dns/Tcp など) は未実行になる。env は /etc 配下と環境変数しか
+    /// 読まず実ネットワークに依存しないので決定的。
+    #[test]
+    fn interrupted_report_records_env_stage() {
+        let target = parse_target("192.0.2.1:9999").unwrap();
+        let (report, _verdict) = interrupted_report(&target);
+
+        assert!(!report.completeness.complete);
+        assert_eq!(
+            report.completeness.truncated_reason,
+            Some(TruncationReason::Interrupted)
+        );
+        assert_eq!(report.completeness.ran_stages, vec![StageName::Env]);
+        assert!(!report.completeness.skipped_stages.contains(&StageName::Env));
+        assert!(report.completeness.skipped_stages.contains(&StageName::Dns));
+        assert!(report.completeness.skipped_stages.contains(&StageName::Tcp));
+        assert!(report
+            .stage_durations
+            .iter()
+            .any(|d| d.stage == StageName::Env));
     }
 
     /// デッドラインが TCP ステージの完了後・Path ステージの前に切れる場合:
