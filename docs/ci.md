@@ -13,11 +13,11 @@ netblame is a plain CLI that reports its result through its **exit code** and, w
 | `0` | No problem (the verdict is `no_problem`). Secondary notes alone do not change this. |
 | `1` | A culprit was identified. This includes `name_does_not_exist` (NXDOMAIN) and `server_down`; every verdict other than `no_problem` is `1`. |
 | `2` | Usage or internal error (e.g. unparseable target, `--json` combined with `--watch`, JSON serialization failure). |
-| `3` | The run was cut short (`--max-time` expired, or Ctrl-C/SIGINT) **before any culprit was identified**. If a culprit was already found when the deadline hit, the exit code is `1`. |
+| `3` | The run was cut short (`--max-time` expired, or Ctrl-C/SIGINT) **before any culprit was identified**. If a culprit was already found when `--max-time` expired, the exit code is `1`. Ctrl-C discards partial results and always exits `3`. `--watch` is the exception (see below). |
 
 `--share` never changes the exit code; an upload failure only prints a warning to stderr.
 
-Do not use `--watch` in CI. It repeats the diagnosis until Ctrl-C and cannot be combined with `--json` (exit `2`). `--max-time` applies to each run inside it and does not stop the loop.
+Do not use `--watch` in CI. It repeats the diagnosis until Ctrl-C and cannot be combined with `--json` (exit `2`). `--max-time` applies to each run inside it and does not stop the loop. Exit codes differ in `--watch`: Ctrl-C is the only way to stop it, and the exit code is `1` if any run during the session found a culprit, otherwise `0`; it is never `3`. A run interrupted by Ctrl-C is discarded and not counted, and a run cut short by `--max-time` without a culprit counts as no problem.
 
 ## Flags worth setting in CI
 
