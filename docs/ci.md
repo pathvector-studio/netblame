@@ -21,7 +21,7 @@ Do not use `--watch` in CI. It repeats the diagnosis until Ctrl-C and cannot be 
 
 ## Flags worth setting in CI
 
-- `--max-time <secs>`: an overall deadline that is checked only **between stages**; it does not interrupt a stage that is already running. Once the deadline has passed, the stages not yet started are skipped, a partial report is still printed, and the exit code is `3` if no culprit was found by then. The running stage finishes first, bounded only by `--timeout <secs>` (default 5, per probe), so the run can overshoot `--max-time` by up to the length of that stage. Use it together with `--timeout` (and a CI-side job timeout as a hard limit) rather than as an exact cap.
+- `--max-time <secs>`: an overall deadline that is checked only **between stages**; it does not interrupt a stage that is already running. Once the deadline has passed, the stages not yet started are skipped, a partial report is still printed, and the exit code is `3` if no culprit was found by then. The running stage always finishes first, so the run can overshoot `--max-time` by up to the length of that stage. Most network stages are bounded by `--timeout <secs>` (default 5, per probe); the trace stage does not take `--timeout` and has its own internal limit of about 75 seconds. Use `--max-time` together with `--timeout` (and a CI-side job timeout as a hard limit) rather than as an exact cap.
 - `--json`: prints one JSON document to stdout. Nothing else is written to stdout in this mode, so piping into `jq` works (except with `--share`, which prints the share URL to stdout after the JSON; avoid combining it with `| jq`). Warnings (e.g. a failed `--share` upload) go to stderr.
 - `--lang en`: fixes the language of the text. Without it, the language is picked from `LC_ALL`, `LC_MESSAGES`, `LANG`.
 - `--no-color`: disables color. Color is also turned off automatically when stdout is not a terminal, which is the case in most CI logs.
@@ -42,10 +42,10 @@ The top level has two keys, `report` and `verdict`.
 | `.report.stage_durations` | Array of `{"stage": "...", "ms": 12.3}`, in execution order. |
 
 ```bash
-netblame --json --lang en --max-time 30 https://example.com > report.json || true   # exit 1/3 are results, not crashes (matters under `set -e`)
+netblame --json --lang en --max-time 30 https://example.com > report.json || true   # exit 1/3 are results, not crashes (matters under `set -e`); note it also swallows exit 2 (usage/internal error)
 jq -r '.verdict.culprit_code' report.json
 jq -r '.report.stage_durations[] | "\(.stage)\t\(.ms)"' report.json
-jq -e '.report.completeness.complete' report.json   # exit 1 if truncated
+jq -e '.report.completeness.complete' report.json   # for detecting truncation: exits 1 if truncated (this stops a script running under `set -e`)
 ```
 
 ## GitHub Actions
