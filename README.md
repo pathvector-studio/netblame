@@ -146,13 +146,14 @@ netblame <target> [flags]
 
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached. If a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and gives `3`.
 
-Ctrl-C gives `3` in normal mode except in these cases:
-
-- With `--json`, a JSON serialization failure exits `2`.
-- Signals other than Ctrl-C (SIGINT), such as SIGTERM, do not give `3`: the process dies by the signal (e.g. 143 in a shell).
-- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. A panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
+Ctrl-C gives `3` in normal mode, except that with `--json` a JSON serialization failure exits `2`.
 
 In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`).
+
+**Other ways the process can exit**:
+
+- Signals other than Ctrl-C (SIGINT), such as SIGTERM, do not give `3`: the process dies by the signal (e.g. 143 in a shell).
+- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
 
