@@ -150,9 +150,9 @@ Ctrl-C gives `3` in normal mode except in these cases:
 
 - With `--json`, a JSON serialization failure exits `2`.
 - Signals other than Ctrl-C (SIGINT), such as SIGTERM, do not give `3`: the process dies by the signal (e.g. 143 in a shell).
-- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside the blocking tasks used by the DNS and trace probes is caught as a join error and the diagnosis continues.
+- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside any other task spawned on the tokio runtime (for example the blocking tasks used by the DNS and trace probes, or tasks that dependency libraries such as hickory-resolver, reqwest and quinn start internally) does not give `101` either: tokio reports it as a join error and the process does not exit. Rust's default panic hook still prints the panic message to stderr.
 
-In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`)
+In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`).
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
 
