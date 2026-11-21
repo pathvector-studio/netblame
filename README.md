@@ -144,7 +144,15 @@ netblame <target> [flags]
 
 **QUIC/HTTP3 probe**: the QUIC probe stage runs automatically (no flag needed) for `https` targets only, right after the HTTP stage. It is cross-platform (Linux and macOS).
 
-**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached (if a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and gives `3`; exceptions: with `--json`, a JSON serialization failure exits `2`, and SIGTERM or a panic is not handled as Ctrl-C, so the process dies by the signal (e.g. 143 in a shell) or exits `101`). In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`)
+**Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached. If a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and gives `3`.
+
+Ctrl-C gives `3` in normal mode except in these cases:
+
+- With `--json`, a JSON serialization failure exits `2`.
+- Signals other than Ctrl-C (SIGINT), such as SIGTERM, do not give `3`: the process dies by the signal (e.g. 143 in a shell).
+- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside the blocking tasks used by the DNS and trace probes is caught as a join error and the diagnosis continues.
+
+In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`)
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
 
