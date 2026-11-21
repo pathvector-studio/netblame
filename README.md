@@ -152,8 +152,8 @@ In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if an
 
 **Other ways the process can exit**:
 
-- Signals other than Ctrl-C (SIGINT), such as SIGTERM, do not give `3`: the process dies by the signal (e.g. 143 in a shell).
-- A panic on the main task (the task running `main`) does not give `3`: the process exits `101`. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
+- A signal other than Ctrl-C (SIGINT), such as SIGTERM, ends the process by that signal, so the exit code is not one of the codes above (e.g. 143 in a shell).
+- A panic on the main task (the task running `main`) ends the process with `101`, which is not one of the codes above either. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
 

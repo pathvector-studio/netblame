@@ -21,8 +21,8 @@ Do not use `--watch` in CI. It repeats the diagnosis until Ctrl-C and cannot be 
 
 ### Other ways the process can exit
 
-- A signal other than Ctrl-C (SIGINT), such as SIGTERM, does not give `3`: the process dies by the signal (e.g. 143 in a shell).
-- A panic on the main task does not give `3` either (exit `101`), whereas a panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
+- A signal other than Ctrl-C (SIGINT), such as SIGTERM, ends the process by that signal, so the exit code is not one of the codes above (e.g. 143 in a shell).
+- A panic on the main task (the task running `main`) ends the process with `101`, which is not one of the codes above either. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
 
 ## Flags worth setting in CI
 
