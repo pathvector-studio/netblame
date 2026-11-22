@@ -146,14 +146,15 @@ netblame <target> [flags]
 
 **Exit codes**: `0` = no problem / `1` = problem detected / `2` = usage or internal error / `3` = truncated by `--max-time` or Ctrl-C (SIGINT) before any verdict was reached. If a culprit was already identified when `--max-time` expired, the normal culprit exit code is kept; Ctrl-C discards partial results and gives `3`.
 
-Ctrl-C gives `3` in normal mode, except that with `--json` a JSON serialization failure exits `2`.
+Ctrl-C gives `3` in normal mode only while the diagnosis is running (see "Other ways the process can exit" for the exceptions), and with `--json` a JSON serialization failure exits `2`.
 
 In `--watch` mode the only way to stop is Ctrl-C, and the exit code is `1` if any run during the session found a problem, otherwise `0` (never `3`).
 
 **Other ways the process can exit**:
 
 - A signal other than Ctrl-C (SIGINT), such as SIGTERM, ends the process by that signal, and its exit status is not one of the codes above (e.g. 143 in a shell).
-- Ctrl-C (SIGINT) that arrives very early, before the diagnosis starts (while the arguments are still being parsed, or, with `--watch`, before the first run begins), is not handled by netblame yet: the process ends by that signal (`130` in a shell) instead of exiting `3` (in `--watch`, instead of `0` or `1`).
+- Ctrl-C (SIGINT) that arrives very early, before the diagnosis starts, is not handled by netblame yet: the process ends by that signal (`130` in a shell) instead of exiting `3` (in `--watch`, instead of `0` or `1`). This window lasts from process start (argument parsing) until the diagnosis begins, i.e. it still includes the moment right after the `diagnosing ...` line (with `--watch`, the `watching every ...` line) is printed.
+- Ctrl-C (SIGINT) that arrives after the diagnosis has finished is ignored: once netblame has started listening for Ctrl-C the OS default action (terminate) is not restored, and nothing is listening any more. The process does not stop and exits as usual (`0`/`1`/`2`, not `3`), after the result is printed and, with `--share`, after the upload ends (the upload cannot be interrupted with Ctrl-C). The same goes for a second Ctrl-C while the report cut short by the first Ctrl-C is being built and printed (the exit code stays `3`). In `--watch`, a Ctrl-C that arrives while a run's result is being printed (between runs) is ignored the same way, as is one during the final summary.
 - A panic on the main task (the task running `main`) ends the process with `101`, which is not one of the codes above. A panic inside the blocking tasks used by netblame's own DNS and trace probes is caught as a join error and the diagnosis continues. How a panic inside a task that a dependency library (hickory-resolver, reqwest, quinn, etc.) starts internally is handled depends on that library: it may be swallowed and the run continues, or it may be propagated to the caller and end in `101`. In every case Rust's default panic hook still prints the panic message to stderr.
 
 **Using netblame in CI**: see [docs/ci.md](docs/ci.md) for exit-code handling, `--json` + `jq` examples and a GitHub Actions snippet.
