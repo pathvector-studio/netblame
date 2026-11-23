@@ -1522,4 +1522,320 @@ mod tests {
             .next_step
             .contains("FW ルールで UDP 443 を確認してください"));
     }
+
+    fn fail_local_dns_slow(r: &mut Report) {
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(450.0);
+            }
+        }
+    }
+
+    // ── judge_primary の判定順 (先の分岐が後の分岐を覆う境界) ──────────────
+
+    /// ローカル系 (System / Local) の DNS ソースだけを失敗させる
+    fn fail_local_dns(r: &mut Report, outcome: DnsOutcome) {
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.outcome = outcome.clone();
+                s.ips.clear();
+                s.latency_ms = None;
+            }
+        }
+    }
+
+    /// 全 DNS ソースを失敗させる
+    fn fail_all_dns(r: &mut Report, outcome: DnsOutcome) {
+        for s in &mut r.dns.sources {
+            s.outcome = outcome.clone();
+            s.ips.clear();
+            s.latency_ms = None;
+        }
+    }
+
+    /// TCP が通るのに経路 MTU 1280 超が黙って消えるトレース
+    fn blackhole_trace() -> Option<TraceReport> {
+        trace_ran(
+            vec![],
+            true,
+            Some(1500),
+            vec![
+                MtuProbe {
+                    size: 1500,
+                    outcome: MtuProbeOutcome::Silent,
+                },
+                MtuProbe {
+                    size: 1280,
+                    outcome: MtuProbeOutcome::Delivered,
+                },
+            ],
+        )
+    }
+
+    fn expire_cert(r: &mut Report) {
+        let tls = r.tls.as_mut().unwrap();
+        tls.verified = false;
+        tls.cert_expired = true;
+        tls.days_until_expiry = Some(-30);
+        tls.error = Some("certificate expired".into());
+    }
+
+    #[test]
+    fn all_dns_dead_is_outbound_dead_even_if_tcp_looks_fine() {
+        // 分岐3: DNS 全滅 (NXDOMAIN ではない) は TCP/TLS の結果に関わらず
+        // 「外向き全滅」(Culprit は TcpBlocked だが Headline は OutboundDead)
+        let mut r = base_report();
+        fail_all_dns(&mut r, DnsOutcome::Timeout);
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::TcpBlocked);
+        assert_eq!(v.headline, Headline::OutboundDead);
+        assert!(v
+            .evidence
+            .iter()
+            .any(|e| matches!(e, Evidence::AllDnsUnresponsive)));
+
+        // TCP も全滅していても、TcpBlocked{port} ではなく OutboundDead のまま
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        assert_eq!(judge(&r).headline, Headline::OutboundDead);
+
+        // SERVFAIL のみ (timeout/error 以外で NXDOMAIN でもない) も同じ扱い
+        let mut r = base_report();
+        fail_all_dns(&mut r, DnsOutcome::ServFail);
+        assert_eq!(judge(&r).headline, Headline::OutboundDead);
+    }
+
+    #[test]
+    fn nxdomain_requires_every_answering_source_to_agree() {
+        // 一部が Timeout/Error でも、回答したソースが全て NXDOMAIN なら
+        // 「名前が存在しない」(分岐1)
+        let mut r = base_report();
+        fail_all_dns(&mut r, DnsOutcome::NxDomain);
+        r.dns.sources[0].outcome = DnsOutcome::Timeout;
+        r.dns.sources[1].outcome = DnsOutcome::Error("socket closed".into());
+        r.tcp.probes.clear();
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        assert_eq!(judge(&r).culprit, Culprit::NameDoesNotExist);
+
+        // ローカルだけ NXDOMAIN を返しパブリックが引ける場合 (DNS 書き換え等) は
+        // NXDOMAIN 扱いにならず、分岐2 のローカル DNS 異常になる
+        let mut r = base_report();
+        fail_local_dns(&mut r, DnsOutcome::NxDomain);
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::LocalDnsBroken);
+        let failed = v
+            .evidence
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Evidence::LocalDnsSourceFailed {
+                        outcome: DnsOutcome::NxDomain,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(failed, 2);
+    }
+
+    #[test]
+    fn local_dns_broken_outranks_tcp_failure() {
+        // DNS (分岐2) は TCP 全滅 (分岐5) より先に判定される
+        let mut r = base_report();
+        fail_local_dns(&mut r, DnsOutcome::Timeout);
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::LocalDnsBroken);
+        assert_eq!(v.headline, Headline::LocalDnsBroken);
+    }
+
+    #[test]
+    fn dns_mismatch_with_only_tls_failure_outranks_tls_verdict() {
+        // TCP は通っていても、DNS 回答が非交差で TLS 検証が失敗していれば
+        // 分岐4 が先に効き、TlsCertInvalid ではなく DnsAnswerMismatch になる
+        let mut r = base_report();
+        let hijack: IpAddr = "10.0.0.99".parse().unwrap();
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.ips = vec![hijack];
+            }
+        }
+        let tls = r.tls.as_mut().unwrap();
+        tls.verified = false;
+        tls.hostname_matches = Some(false);
+        tls.error = Some("invalid peer certificate: NotValidForName".into());
+        r.http = None;
+        assert_eq!(judge(&r).culprit, Culprit::DnsAnswerMismatch);
+    }
+
+    #[test]
+    fn tcp_mixed_refused_and_timeout_is_tcp_blocked_not_server_down() {
+        // ServerDown は「全て Refused」のときだけ。1つでも Timeout が混じれば TcpBlocked
+        let mut r = base_report();
+        r.tcp.probes = vec![
+            fail_probe(ip4(34), TcpOutcome::Refused),
+            fail_probe(ip6(), TcpOutcome::Timeout),
+        ];
+        r.tls = None;
+        r.http = None;
+        r.path = None;
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::TcpBlocked);
+        assert_eq!(v.headline, Headline::TcpBlocked { port: 443 });
+    }
+
+    #[test]
+    fn tcp_and_ipv6_failures_outrank_expired_cert() {
+        // IPv6 だけ死んでいる (分岐6) は TLS 系 (分岐7) より先
+        let mut r = base_report();
+        expire_cert(&mut r);
+        r.tcp.probes = vec![ok_probe(ip4(34)), fail_probe(ip6(), TcpOutcome::Timeout)];
+        assert_eq!(judge(&r).culprit, Culprit::Ipv6Broken);
+
+        // TCP 全滅 (分岐5) も TLS 系より先
+        let mut r = base_report();
+        expire_cert(&mut r);
+        r.tcp.probes = vec![fail_probe(ip4(34), TcpOutcome::Timeout)];
+        assert_eq!(judge(&r).culprit, Culprit::TcpBlocked);
+    }
+
+    #[test]
+    fn expired_cert_outranks_interception_flag() {
+        // 期限切れと傍受疑いが同時に立っている場合は期限切れが優先
+        let mut r = base_report();
+        expire_cert(&mut r);
+        let tls = r.tls.as_mut().unwrap();
+        tls.interception_suspected = true;
+        tls.presented_issuer = Some("CN=Zscaler Intermediate Root CA".into());
+        r.http = None;
+        assert_eq!(judge(&r).culprit, Culprit::TlsCertExpired);
+    }
+
+    #[test]
+    fn pmtu_blackhole_ordering_against_tls_and_soft_verdicts() {
+        // 分岐7.5: TLS 系 (分岐7) には負けるが、サーバ遅延・経路不安定 (分岐9/10) には勝つ
+        let mut r = base_report();
+        r.trace = blackhole_trace();
+        r.http.as_mut().unwrap().ttfb_ms = Some(4200.0);
+        r.path.as_mut().unwrap().loss_pct = 30.0;
+        assert_eq!(judge(&r).culprit, Culprit::PmtuBlackhole);
+
+        expire_cert(&mut r);
+        assert_eq!(judge(&r).culprit, Culprit::TlsCertExpired);
+    }
+
+    #[test]
+    fn proxy_env_with_http_status_is_not_interference() {
+        // 分岐8 は「HTTP エラーあり かつ status なし」のときだけ。
+        // status が返っていればプロキシ設定があっても主犯にはならず副次所見に留まる
+        let mut r = base_report();
+        r.env.proxies = vec![("https_proxy".into(), "http://proxy.corp:8080".into())];
+        r.http = Some(HttpReport {
+            status: Some(502),
+            error: Some("bad gateway".into()),
+            ..healthy_http()
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::NoProblem);
+        assert!(v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::ProxyEnvPresent { .. })));
+    }
+
+    #[test]
+    fn soft_verdict_ordering_server_slow_then_unstable_then_dns_slow_then_udp443() {
+        // 分岐 9 > 10 > 11 > 12 の優先順を、条件を1つずつ外して確かめる
+        let mut r = base_report();
+        r.http = Some(HttpReport {
+            ttfb_ms: Some(4200.0),
+            ..healthy_http_with_h3()
+        });
+        r.path.as_mut().unwrap().loss_pct = 30.0;
+        fail_local_dns_slow(&mut r);
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
+
+        r.http.as_mut().unwrap().ttfb_ms = Some(80.0);
+        assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
+
+        r.path = Some(healthy_path());
+        assert_eq!(judge(&r).culprit, Culprit::LocalDnsSlow);
+
+        for s in &mut r.dns.sources {
+            s.latency_ms = Some(15.0);
+        }
+        assert_eq!(judge(&r).culprit, Culprit::Udp443Blocked);
+    }
+
+    #[test]
+    fn udp443_blocked_requires_successful_http_status() {
+        // QUIC 全滅 + h3 広告でも、HTTP が 2xx/3xx でなければ分岐12 には入らない
+        let mut r = base_report();
+        r.http = Some(HttpReport {
+            status: Some(503),
+            ..healthy_http_with_h3()
+        });
+        r.quic = Some(QuicReport {
+            outcome: QuicOutcome::Timeout,
+        });
+        let v = judge(&r);
+        assert_eq!(v.culprit, Culprit::NoProblem);
+        // 現状の挙動: 主犯が NoProblem のままなので QUIC の副次所見も付かない
+        assert!(!v
+            .secondary
+            .iter()
+            .any(|s| matches!(s, Finding::QuicBrokenSecondary { .. })));
+    }
+
+    #[test]
+    fn threshold_boundaries_are_exact() {
+        // UnstablePath: loss は >= 10.0、jitter は > 50.0
+        let mut r = base_report();
+        r.path.as_mut().unwrap().loss_pct = 9.9;
+        r.path.as_mut().unwrap().jitter_ms = Some(50.0);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+        r.path.as_mut().unwrap().loss_pct = 10.0;
+        assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
+        r.path.as_mut().unwrap().loss_pct = 0.0;
+        r.path.as_mut().unwrap().jitter_ms = Some(50.1);
+        assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
+
+        // ServerSlow: ttfb は > 1000、connect は < 100
+        let mut r = base_report();
+        r.http.as_mut().unwrap().ttfb_ms = Some(1000.0);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+        r.http.as_mut().unwrap().ttfb_ms = Some(1000.1);
+        assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
+        r.tcp.probes[0].avg_ms = Some(100.0);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+
+        // LocalDnsSlow: local は > 200、public は < 100
+        let mut r = base_report();
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(200.0);
+            }
+        }
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(200.1);
+            }
+            if s.is_public() {
+                s.latency_ms = Some(100.0);
+            }
+        }
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+    }
 }
