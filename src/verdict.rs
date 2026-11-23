@@ -1811,55 +1811,95 @@ mod tests {
             .any(|s| matches!(s, Finding::QuicBrokenSecondary { .. })));
     }
 
+    /// 境界テスト用: base_report から ttfb と TCP connect (avg_ms) だけを変えた Report。
+    /// 他の条件 (DNS / TLS / path など) は base_report のまま。
+    fn report_with_ttfb_connect(ttfb_ms: f64, connect_ms: f64) -> Report {
+        let mut r = base_report();
+        r.http.as_mut().unwrap().ttfb_ms = Some(ttfb_ms);
+        r.tcp.probes[0].avg_ms = Some(connect_ms);
+        r
+    }
+
+    /// 境界テスト用: base_report から DNS の local 系 / public 系の latency だけを変えた Report。
+    fn report_with_dns_latency(local_ms: f64, public_ms: f64) -> Report {
+        let mut r = base_report();
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(local_ms);
+            }
+            if s.is_public() {
+                s.latency_ms = Some(public_ms);
+            }
+        }
+        r
+    }
+
+    /// UnstablePath: loss は >= 10.0 (LOSS_PCT_THRESHOLD)、jitter は > 50.0 (JITTER_MS_THRESHOLD)。
+    /// 各ケースは base_report から独立に組み立てる。
     #[test]
-    fn threshold_boundaries_are_exact() {
-        // UnstablePath: loss は >= 10.0、jitter は > 50.0
-        let mut r = base_report();
-        r.path.as_mut().unwrap().loss_pct = 9.9;
-        r.path.as_mut().unwrap().jitter_ms = Some(50.0);
-        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
-        r.path.as_mut().unwrap().loss_pct = 10.0;
-        assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
-        r.path.as_mut().unwrap().loss_pct = 0.0;
-        r.path.as_mut().unwrap().jitter_ms = Some(50.1);
-        assert_eq!(judge(&r).culprit, Culprit::UnstablePath);
+    fn unstable_path_boundaries_are_exact() {
+        let cases: [(f64, f64, Culprit); 4] = [
+            // (loss_pct, jitter_ms, 期待)
+            (9.9, 50.0, Culprit::NoProblem),
+            (10.0, 50.0, Culprit::UnstablePath),
+            (0.0, 50.0, Culprit::NoProblem),
+            (0.0, 50.1, Culprit::UnstablePath),
+        ];
+        for (loss, jitter, expected) in cases {
+            let mut r = base_report();
+            r.path.as_mut().unwrap().loss_pct = loss;
+            r.path.as_mut().unwrap().jitter_ms = Some(jitter);
+            assert_eq!(
+                judge(&r).culprit,
+                expected,
+                "UnstablePath: loss={loss}, jitter={jitter}"
+            );
+        }
+    }
 
-        // ServerSlow: ttfb は > 1000、connect は < 100
-        let mut r = base_report();
-        r.http.as_mut().unwrap().ttfb_ms = Some(1000.0);
-        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
-        r.http.as_mut().unwrap().ttfb_ms = Some(1000.1);
-        assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
-        r.tcp.probes[0].avg_ms = Some(100.0);
-        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
-        r.tcp.probes[0].avg_ms = Some(99.9);
-        assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
+    /// ServerSlow: ttfb は > 1000 (SLOW_TTFB_MS)、connect は < 100 (FAST_CONNECT_MS)。
+    /// 各ケースは base_report から独立に組み立てる (他条件は満たしたまま 1 つの閾値だけを突く)。
+    #[test]
+    fn server_slow_ttfb_boundary_is_exclusive() {
+        // connect は 99.9 (< 100 を満たす) に固定し、ttfb だけ動かす
+        let r = report_with_ttfb_connect(1000.0, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem, "ttfb=1000.0");
+        let r = report_with_ttfb_connect(1000.1, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::ServerSlow, "ttfb=1000.1");
+    }
 
-        // LocalDnsSlow: local は > 200、public は < 100
+    #[test]
+    fn server_slow_connect_boundary_is_exclusive() {
+        // ttfb は 1000.1 (> 1000 を満たす) に固定し、connect だけ動かす
+        let r = report_with_ttfb_connect(1000.1, 100.0);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem, "connect=100.0");
+        let r = report_with_ttfb_connect(1000.1, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::ServerSlow, "connect=99.9");
+    }
+
+    /// LocalDnsSlow: local は > 200 (SLOW_LOCAL_DNS_MS)、public は < 100 (FAST_PUBLIC_DNS_MS)。
+    #[test]
+    fn local_dns_slow_local_boundary_is_exclusive() {
+        // public は 99.9 (< 100 を満たす) に固定し、local だけ動かす
+        let r = report_with_dns_latency(200.0, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem, "local=200.0");
+        let r = report_with_dns_latency(200.1, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::LocalDnsSlow, "local=200.1");
+    }
+
+    #[test]
+    fn local_dns_slow_public_boundary_is_exclusive() {
+        // local は 200.1 (> 200 を満たす) に固定し、public だけ動かす
+        let r = report_with_dns_latency(200.1, 100.0);
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem, "public=100.0");
+        let r = report_with_dns_latency(200.1, 99.9);
+        assert_eq!(judge(&r).culprit, Culprit::LocalDnsSlow, "public=99.9");
+    }
+
+    /// 旧テストが確かめていた「local ちょうど 200.0 / public は base_report の速い値のまま」も維持する。
+    #[test]
+    fn local_dns_slow_local_exactly_200_with_base_public_is_no_problem() {
         let mut r = base_report();
-        for s in &mut r.dns.sources {
-            if s.is_local() {
-                s.latency_ms = Some(200.0);
-            }
-        }
-        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
-        for s in &mut r.dns.sources {
-            if s.is_local() {
-                s.latency_ms = Some(200.1);
-            }
-            if s.is_public() {
-                s.latency_ms = Some(100.0);
-            }
-        }
-        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
-        // 両側の閾値を満たす値: local 200.1 (> 200) かつ public 99.9 (< 100)
-        for s in &mut r.dns.sources {
-            if s.is_public() {
-                s.latency_ms = Some(99.9);
-            }
-        }
-        assert_eq!(judge(&r).culprit, Culprit::LocalDnsSlow);
-        // local がちょうど 200.0 なら public が速くても判定されない
         for s in &mut r.dns.sources {
             if s.is_local() {
                 s.latency_ms = Some(200.0);
