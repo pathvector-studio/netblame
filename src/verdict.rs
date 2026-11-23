@@ -971,6 +971,19 @@ mod tests {
         }
     }
 
+    /// ローカル DNS が遅い状態 (分岐11 LocalDnsSlow) にする:
+    /// ローカル系 (System / Local) ソースの latency_ms を 450.0 ms
+    /// (SLOW_LOCAL_DNS_MS = 200 超) にする。outcome / ips は成功のまま。
+    /// パブリック系は base_report の 20 / 22 ms (FAST_PUBLIC_DNS_MS = 100 未満) の
+    /// ままなので、これだけで LocalDnsSlow の条件が成立する。
+    fn fail_local_dns_slow(r: &mut Report) {
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(450.0);
+            }
+        }
+    }
+
     #[test]
     fn no_problem() {
         let r = base_report();
@@ -1523,14 +1536,6 @@ mod tests {
             .contains("FW ルールで UDP 443 を確認してください"));
     }
 
-    fn fail_local_dns_slow(r: &mut Report) {
-        for s in &mut r.dns.sources {
-            if s.is_local() {
-                s.latency_ms = Some(450.0);
-            }
-        }
-    }
-
     // ── judge_primary の判定順 (先の分岐が後の分岐を覆う境界) ──────────────
 
     /// ローカル系 (System / Local) の DNS ソースだけを失敗させる
@@ -1582,6 +1587,7 @@ mod tests {
 
     #[test]
     fn all_dns_dead_is_outbound_dead_even_if_tcp_looks_fine() {
+        // 現状の挙動を固定（👤 判断待ち）
         // 分岐3: DNS 全滅 (NXDOMAIN ではない) は TCP/TLS の結果に関わらず
         // 「外向き全滅」(Culprit は TcpBlocked だが Headline は OutboundDead)
         let mut r = base_report();
@@ -1734,6 +1740,7 @@ mod tests {
 
     #[test]
     fn proxy_env_with_http_status_is_not_interference() {
+        // 現状の挙動を固定（👤 判断待ち）
         // 分岐8 は「HTTP エラーあり かつ status なし」のときだけ。
         // status が返っていればプロキシ設定があっても主犯にはならず副次所見に留まる
         let mut r = base_report();
@@ -1791,7 +1798,7 @@ mod tests {
         });
         let v = judge(&r);
         assert_eq!(v.culprit, Culprit::NoProblem);
-        // 現状の挙動: 主犯が NoProblem のままなので QUIC の副次所見も付かない
+        // 現状の挙動を固定（👤 判断待ち）: 主犯が NoProblem のままなので QUIC の副次所見も付かない
         assert!(!v
             .secondary
             .iter()
@@ -1819,6 +1826,8 @@ mod tests {
         assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
         r.tcp.probes[0].avg_ms = Some(100.0);
         assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+        r.tcp.probes[0].avg_ms = Some(99.9);
+        assert_eq!(judge(&r).culprit, Culprit::ServerSlow);
 
         // LocalDnsSlow: local は > 200、public は < 100
         let mut r = base_report();
@@ -1834,6 +1843,20 @@ mod tests {
             }
             if s.is_public() {
                 s.latency_ms = Some(100.0);
+            }
+        }
+        assert_eq!(judge(&r).culprit, Culprit::NoProblem);
+        // 両側の閾値を満たす値: local 200.1 (> 200) かつ public 99.9 (< 100)
+        for s in &mut r.dns.sources {
+            if s.is_public() {
+                s.latency_ms = Some(99.9);
+            }
+        }
+        assert_eq!(judge(&r).culprit, Culprit::LocalDnsSlow);
+        // local がちょうど 200.0 なら public が速くても判定されない
+        for s in &mut r.dns.sources {
+            if s.is_local() {
+                s.latency_ms = Some(200.0);
             }
         }
         assert_eq!(judge(&r).culprit, Culprit::NoProblem);
