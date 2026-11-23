@@ -1588,6 +1588,7 @@ mod tests {
     #[test]
     fn all_dns_dead_is_outbound_dead_even_if_tcp_looks_fine() {
         // 現状の挙動を固定（👤 判断待ち）
+        // culprit_code が tcp_blocked で TCP 遮断と区別できない点も含めて固定
         // 分岐3: DNS 全滅 (NXDOMAIN ではない) は TCP/TLS の結果に関わらず
         // 「外向き全滅」(Culprit は TcpBlocked だが Headline は OutboundDead)
         let mut r = base_report();
@@ -1595,6 +1596,7 @@ mod tests {
         let v = judge(&r);
         assert_eq!(v.culprit, Culprit::TcpBlocked);
         assert_eq!(v.headline, Headline::OutboundDead);
+        assert_eq!(v.render(Lang::En).culprit_code, "tcp_blocked");
         assert!(v
             .evidence
             .iter()
@@ -1605,12 +1607,16 @@ mod tests {
         r.tls = None;
         r.http = None;
         r.path = None;
-        assert_eq!(judge(&r).headline, Headline::OutboundDead);
+        let v = judge(&r);
+        assert_eq!(v.headline, Headline::OutboundDead);
+        assert_eq!(v.render(Lang::En).culprit_code, "tcp_blocked");
 
         // SERVFAIL のみ (timeout/error 以外で NXDOMAIN でもない) も同じ扱い
         let mut r = base_report();
         fail_all_dns(&mut r, DnsOutcome::ServFail);
-        assert_eq!(judge(&r).headline, Headline::OutboundDead);
+        let v = judge(&r);
+        assert_eq!(v.headline, Headline::OutboundDead);
+        assert_eq!(v.render(Lang::En).culprit_code, "tcp_blocked");
     }
 
     #[test]
