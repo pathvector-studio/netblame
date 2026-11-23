@@ -1907,4 +1907,78 @@ mod tests {
         }
         assert_eq!(judge(&r).culprit, Culprit::NoProblem);
     }
+
+    /// 全 Culprit に 0..CULPRIT_COUNT の連番を振るヘルパー。`match` にワイルドカードを
+    /// 置かないので、バリアントを足すとここがコンパイルエラーになる。足したら連番と
+    /// `CULPRIT_COUNT` を増やすこと。表に載せ忘れると下のテストが落ちる。
+    const CULPRIT_COUNT: usize = 16;
+    fn slot(c: Culprit) -> usize {
+        match c {
+            Culprit::LocalDnsBroken => 0,
+            Culprit::LocalDnsSlow => 1,
+            Culprit::DnsAnswerMismatch => 2,
+            Culprit::NameDoesNotExist => 3,
+            Culprit::TcpBlocked => 4,
+            Culprit::Ipv6Broken => 5,
+            Culprit::TlsCertExpired => 6,
+            Culprit::TlsCertInvalid => 7,
+            Culprit::TlsIntercepted => 8,
+            Culprit::ProxyInterference => 9,
+            Culprit::UnstablePath => 10,
+            Culprit::PmtuBlackhole => 11,
+            Culprit::Udp443Blocked => 12,
+            Culprit::ServerSlow => 13,
+            Culprit::ServerDown => 14,
+            Culprit::NoProblem => 15,
+        }
+    }
+
+    /// JSON の `.verdict.culprit_code` は利用者のスクリプトが読む公開値。
+    /// 改名は破壊的変更なので、期待値をここに直書きして固定する。
+    /// docs/ci*.md と tests/fixtures/sample_report.json に実例があるのは
+    /// no_problem / local_dns_broken / server_down / name_does_not_exist の4つで、
+    /// 残りは 2026-11 時点の実装の値をそのまま固定している。
+    const CULPRIT_CODES: [(Culprit, &str); 16] = [
+        (Culprit::LocalDnsBroken, "local_dns_broken"),
+        (Culprit::LocalDnsSlow, "local_dns_slow"),
+        (Culprit::DnsAnswerMismatch, "dns_answer_mismatch"),
+        (Culprit::NameDoesNotExist, "name_does_not_exist"),
+        (Culprit::TcpBlocked, "tcp_blocked"),
+        (Culprit::Ipv6Broken, "ipv6_broken"),
+        (Culprit::TlsCertExpired, "tls_cert_expired"),
+        (Culprit::TlsCertInvalid, "tls_cert_invalid"),
+        (Culprit::TlsIntercepted, "tls_intercepted"),
+        (Culprit::ProxyInterference, "proxy_interference"),
+        (Culprit::UnstablePath, "unstable_path"),
+        (Culprit::PmtuBlackhole, "pmtu_blackhole"),
+        (Culprit::Udp443Blocked, "udp443_blocked"),
+        (Culprit::ServerSlow, "server_slow"),
+        (Culprit::ServerDown, "server_down"),
+        (Culprit::NoProblem, "no_problem"),
+    ];
+
+    #[test]
+    fn culprit_code_table_pins_every_variant() {
+        for (culprit, expected) in CULPRIT_CODES {
+            assert_eq!(culprit.code(), expected, "{culprit:?}");
+        }
+    }
+
+    #[test]
+    fn culprit_code_table_covers_all_variants_without_duplicates() {
+        // 表の各行が別々のバリアントで、かつ全バリアントを覆っている
+        let mut slots: Vec<usize> = CULPRIT_CODES.iter().map(|&(c, _)| slot(c)).collect();
+        slots.sort_unstable();
+        assert_eq!(
+            slots,
+            (0..CULPRIT_COUNT).collect::<Vec<_>>(),
+            "CULPRIT_CODES が全 Culprit を過不足なく含んでいない"
+        );
+        // 全コードが一意
+        let mut codes: Vec<&str> = CULPRIT_CODES.iter().map(|&(_, code)| code).collect();
+        codes.sort_unstable();
+        let n = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), n, "culprit_code が重複している");
+    }
 }
