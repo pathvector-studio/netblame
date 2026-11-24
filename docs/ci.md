@@ -48,17 +48,24 @@ The top level has two keys, `report` and `verdict`.
 | `.report.completeness.ran_stages`, `.skipped_stages` | Arrays of stage names (`env`, `dns`, `tcp`, `tls`, `http`, `quic`, `path`, `trace`). |
 | `.report.stage_durations` | Array of `{"stage": "...", "ms": 12.3}`, in execution order. |
 
+```bash
+netblame --json --lang en --max-time 30 https://example.com > report.json || true   # exit 1/3 are results, not crashes (matters under `set -e`); note it also swallows exit 2 (usage/internal error)
+jq -r '.verdict.culprit_code' report.json
+jq -r '.report.stage_durations[] | "\(.stage)\t\(.ms)"' report.json
+jq -e '.report.completeness.complete' report.json   # for detecting truncation: exits 1 if truncated (this stops a script running under `set -e`)
+```
+
 ### `culprit_code` values
 
 Every value `.verdict.culprit_code` can take. Only one is reported per run.
 
 | `culprit_code` | Meaning |
 |---|---|
-| `local_dns_broken` | The local DNS resolver does not answer, while public DNS resolves the name. |
+| `local_dns_broken` | No local resolver gave a successful answer (SERVFAIL and NXDOMAIN count as failures too), while public DNS succeeded. |
 | `local_dns_slow` | The local DNS resolver is slow while public DNS is fast. |
-| `dns_answer_mismatch` | Local and public DNS return different answers, and the connection (or TLS) then fails. |
+| `dns_answer_mismatch` | The IP sets from local and public DNS share no address, and either every TCP connection or the TLS handshake failed. |
 | `name_does_not_exist` | The name does not exist (NXDOMAIN from every source that answered). Not a network fault. |
-| `tcp_blocked` | TCP connections time out (filtered or unreachable). Also used when DNS is dead everywhere (not NXDOMAIN), i.e. outbound traffic looks dead as a whole; the text headline differs in that case, but the code is the same. |
+| `tcp_blocked` | Every TCP connection failed, and not all of them were refused (all timeouts, or a mix of timeouts and refusals). Also used when DNS is dead everywhere (not NXDOMAIN), i.e. outbound traffic looks dead as a whole; the text headline differs in that case, but the code is the same. |
 | `ipv6_broken` | IPv6 connections fail while IPv4 works. |
 | `tls_cert_expired` | The server's TLS certificate has expired. |
 | `tls_cert_invalid` | TLS certificate verification failed (chain verification error and the like). |
@@ -72,13 +79,6 @@ Every value `.verdict.culprit_code` can take. Only one is reported per run.
 | `no_problem` | No problem found. |
 
 Relation to the exit code: `no_problem` gives exit code `0` (or `3` if the run was cut short before any culprit was found); every other value gives `1`.
-
-```bash
-netblame --json --lang en --max-time 30 https://example.com > report.json || true   # exit 1/3 are results, not crashes (matters under `set -e`); note it also swallows exit 2 (usage/internal error)
-jq -r '.verdict.culprit_code' report.json
-jq -r '.report.stage_durations[] | "\(.stage)\t\(.ms)"' report.json
-jq -e '.report.completeness.complete' report.json   # for detecting truncation: exits 1 if truncated (this stops a script running under `set -e`)
-```
 
 ## GitHub Actions
 
