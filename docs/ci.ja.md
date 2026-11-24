@@ -48,17 +48,24 @@ CI で `--watch` は使わないでください。Ctrl-C まで診断を繰り�
 | `.report.completeness.ran_stages`、`.skipped_stages` | ステージ名 (`env`、`dns`、`tcp`、`tls`、`http`、`quic`、`path`、`trace`) の配列。 |
 | `.report.stage_durations` | `{"stage": "...", "ms": 12.3}` の配列 (実行順)。 |
 
+```bash
+netblame --json --lang en --max-time 30 https://example.com > report.json || true   # 終了コード 1/3 は結果であり異常ではない (`set -e` 下で必要)。終了コード 2 (使い方・内部エラー) も握りつぶす点に注意
+jq -r '.verdict.culprit_code' report.json
+jq -r '.report.stage_durations[] | "\(.stage)\t\(.ms)"' report.json
+jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打ち切りなら終了コード 1 (`set -e` 下ではここでスクリプトが止まる)
+```
+
 ### `culprit_code` の値
 
 `.verdict.culprit_code` が取りうる全ての値です。1 回の実行で報告されるのは 1 つだけです。
 
 | `culprit_code` | 意味 |
 |---|---|
-| `local_dns_broken` | ローカル DNS が応答しない (パブリック DNS では名前が引ける)。 |
+| `local_dns_broken` | ローカル系リゾルバに成功応答が 1 つも無い (SERVFAIL や NXDOMAIN も失敗として数える) のに、パブリック DNS は成功している。 |
 | `local_dns_slow` | ローカル DNS が遅い (パブリック DNS は速い)。 |
-| `dns_answer_mismatch` | ローカルとパブリックで DNS の回答が異なり、そのうえで接続 (または TLS) が失敗している。 |
+| `dns_answer_mismatch` | ローカルとパブリックの IP 集合に重なりが無く、かつ全 TCP 接続または TLS が失敗している。 |
 | `name_does_not_exist` | 名前が存在しない (回答した全ソースが NXDOMAIN)。ネットワークのせいではありません。 |
-| `tcp_blocked` | TCP 接続がタイムアウトする (フィルタされている、または到達不能)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
+| `tcp_blocked` | 全 TCP 接続が失敗し、すべてが Refused ではない (全てタイムアウト、またはタイムアウトと Refused の混在。フィルタや到達不能が疑わしい)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
 | `ipv6_broken` | IPv4 は通るのに IPv6 の接続が失敗する。 |
 | `tls_cert_expired` | サーバの TLS 証明書の期限が切れている。 |
 | `tls_cert_invalid` | TLS 証明書の検証に失敗した (チェーン検証エラーなど)。 |
@@ -72,13 +79,6 @@ CI で `--watch` は使わないでください。Ctrl-C まで診断を繰り�
 | `no_problem` | 問題は見つからなかった。 |
 
 終了コードとの関係: `no_problem` の終了コードは `0` です (犯人が見つかる前に打ち切られた場合は `3`)。それ以外の値は全て `1` です。
-
-```bash
-netblame --json --lang en --max-time 30 https://example.com > report.json || true   # 終了コード 1/3 は結果であり異常ではない (`set -e` 下で必要)。終了コード 2 (使い方・内部エラー) も握りつぶす点に注意
-jq -r '.verdict.culprit_code' report.json
-jq -r '.report.stage_durations[] | "\(.stage)\t\(.ms)"' report.json
-jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打ち切りなら終了コード 1 (`set -e` 下ではここでスクリプトが止まる)
-```
 
 ## GitHub Actions
 
