@@ -63,9 +63,9 @@ jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打
 |---|---|
 | `local_dns_broken` | ローカル系リゾルバに成功応答が 1 つも無い (SERVFAIL や NXDOMAIN も失敗として数える) のに、パブリック DNS は成功している。 |
 | `local_dns_slow` | ローカル DNS が遅い (パブリック DNS は速い)。 |
-| `dns_answer_mismatch` | ローカルとパブリックの IP 集合に重なりが無く、かつ全 TCP 接続または TLS が失敗している。 |
+| `dns_answer_mismatch` | ローカルとパブリックの IP 集合に重なりが無く、かつ全 TCP 接続が失敗、または TLS が失敗している (証明書検証の失敗を含む)。 |
 | `name_does_not_exist` | 名前が存在しない (回答した全ソースが NXDOMAIN)。ネットワークのせいではありません。 |
-| `tcp_blocked` | 全 TCP 接続が失敗し、すべてが Refused ではない (全てタイムアウト、またはタイムアウトと Refused の混在。フィルタや到達不能が疑わしい)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
+| `tcp_blocked` | 全 TCP 接続が失敗し、すべてが Refused ではない (例えば全てタイムアウト、タイムアウトと Refused の混在、unreachable などその他の接続エラー。フィルタや到達不能が疑わしい)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
 | `ipv6_broken` | IPv4 は通るのに IPv6 の接続が失敗する。 |
 | `tls_cert_expired` | サーバの TLS 証明書の期限が切れている。 |
 | `tls_cert_invalid` | TLS 証明書の検証に失敗した (チェーン検証エラーなど)。 |
@@ -77,6 +77,8 @@ jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打
 | `server_slow` | 接続は速いのに、サーバの最初のバイトまでの応答 (TTFB) が遅い。 |
 | `server_down` | TCP 接続が全て拒否された。サーバが落ちているか、ポートが閉じている。 |
 | `no_problem` | 問題は見つからなかった。 |
+
+表の各行は独立した条件ではありません。判定ロジックの上から順に調べ、最初に当てはまったものが報告されます。例えば、ローカルとパブリックの IP 集合に重なりが無ければ、全 TCP 接続が拒否されていても `server_down` ではなく `dns_answer_mismatch` になります。
 
 終了コードとの関係: `no_problem` の終了コードは `0` です (犯人が見つかる前に打ち切られた場合は `3`)。それ以外の値は全て `1` です。
 
