@@ -65,7 +65,7 @@ Every value `.verdict.culprit_code` can take. Only one is reported per run.
 | `local_dns_slow` | The local DNS resolver is slow while public DNS is fast. |
 | `dns_answer_mismatch` | The IP sets from local and public DNS share no address, and either every TCP connection failed or TLS failed (including certificate verification errors). |
 | `name_does_not_exist` | The name does not exist (NXDOMAIN from every source that answered). Not a network fault. |
-| `tcp_blocked` | Every TCP connection failed, and not all of them were refused (for example all timeouts, a mix of timeouts and refusals, or other connection errors such as unreachable). Also used when DNS is dead everywhere (not NXDOMAIN), i.e. outbound traffic looks dead as a whole; the text headline differs in that case, but the code is the same. |
+| `tcp_blocked` | Every IP's TCP probe failed, and not every IP's result was Refused (for example all timeouts, a mix of timeouts on some IPs and refusals on others, where an IP whose attempts mixed refusals and timeouts counts as refused, or other connection errors such as unreachable). Also used when DNS is dead everywhere (not NXDOMAIN), i.e. outbound traffic looks dead as a whole; the text headline differs in that case, but the code is the same. |
 | `ipv6_broken` | IPv6 connections fail while IPv4 works. |
 | `tls_cert_expired` | The server's TLS certificate has expired. |
 | `tls_cert_invalid` | TLS certificate verification failed (chain verification error and the like). |
@@ -75,10 +75,10 @@ Every value `.verdict.culprit_code` can take. Only one is reported per run.
 | `pmtu_blackhole` | PMTUD black hole: small packets get through, but the path MTU is limited and the ICMP notification is missing. |
 | `udp443_blocked` | UDP 443 (QUIC) appears blocked while TCP, TLS and HTTP are all healthy and HTTP/3 is advertised. |
 | `server_slow` | The connection is fast but the server's time to first byte is slow. |
-| `server_down` | Every TCP connection is refused: the server is down or the port is closed. |
+| `server_down` | Every IP's TCP probe is refused: the server is down or the port is closed. |
 | `no_problem` | No problem found. |
 
-The rows are not independent conditions: the code is decided by checking them in order from the top of the verdict logic, and the first match wins. For example, if the IP sets from local and public DNS share no address, `dns_answer_mismatch` is reported even when every TCP connection is refused (not `server_down`).
+The rows are not independent conditions: the code is decided by checking conditions in the order of the verdict logic (which differs from the order of the rows above), and the first match wins. The first checks run in this order: `name_does_not_exist`, `local_dns_broken`, `tcp_blocked` (DNS dead everywhere), `dns_answer_mismatch`, then `server_down` / `tcp_blocked` (TCP failed), and the remaining codes after that. For example, if the IP sets from local and public DNS share no address, `dns_answer_mismatch` is reported even when every TCP connection is refused (not `server_down`).
 
 Relation to the exit code: `no_problem` gives exit code `0` (or `3` if the run was cut short before any culprit was found); every other value gives `1`.
 
