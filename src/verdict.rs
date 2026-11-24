@@ -13,7 +13,6 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Culprit {
     /// ローカル系リゾルバに成功応答が無い (SERVFAIL・NXDOMAIN も失敗扱い) がパブリックは成功
-    /// (全ソース NXDOMAIN なら先に NameDoesNotExist)
     LocalDnsBroken,
     /// ローカル DNS が遅い
     LocalDnsSlow,
@@ -22,7 +21,9 @@ pub enum Culprit {
     DnsAnswerMismatch,
     /// 名前が存在しない (NXDOMAIN) — ネットワークのせいではない
     NameDoesNotExist,
-    /// 全 TCP 接続が失敗し、全てが Refused ではない (タイムアウト等を含む)。
+    /// 全 IP の TCP プローブが失敗し、IP ごとの結果 (outcome) が全て Refused ではない
+    /// (1 つの IP 内で Refused とタイムアウトが混ざった試行は、その IP では Refused 扱い)。
+    /// ローカルとパブリックの IP 集合に重なりが無ければ先に DnsAnswerMismatch。
     /// DNS が NXDOMAIN 以外でどこからも引けない場合 (外向き通信が全滅に見える) もここ
     TcpBlocked,
     /// IPv6 経路が壊れている (IPv4 は正常)

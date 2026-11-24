@@ -65,7 +65,7 @@ jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打
 | `local_dns_slow` | ローカル DNS が遅い (パブリック DNS は速い)。 |
 | `dns_answer_mismatch` | ローカルとパブリックの IP 集合に重なりが無く、かつ全 TCP 接続が失敗、または TLS が失敗している (証明書検証の失敗を含む)。 |
 | `name_does_not_exist` | 名前が存在しない (回答した全ソースが NXDOMAIN)。ネットワークのせいではありません。 |
-| `tcp_blocked` | 全 TCP 接続が失敗し、すべてが Refused ではない (例えば全てタイムアウト、タイムアウトと Refused の混在、unreachable などその他の接続エラー。フィルタや到達不能が疑わしい)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
+| `tcp_blocked` | 全 IP の TCP プローブが失敗し、IP ごとの結果がすべて Refused ではない (例えば全てタイムアウト、IP 間でのタイムアウトと Refused の混在 (1 つの IP 内で Refused とタイムアウトが混ざった場合、その IP は Refused 扱い)、unreachable などその他の接続エラー。フィルタや到達不能が疑わしい)。DNS がどこからも引けない (NXDOMAIN ではない) 場合、つまり外向き通信が全滅しているように見える場合にも、このコードになります。その場合は画面の見出しは異なりますが、コードは同じです。 |
 | `ipv6_broken` | IPv4 は通るのに IPv6 の接続が失敗する。 |
 | `tls_cert_expired` | サーバの TLS 証明書の期限が切れている。 |
 | `tls_cert_invalid` | TLS 証明書の検証に失敗した (チェーン検証エラーなど)。 |
@@ -75,10 +75,10 @@ jq -e '.report.completeness.complete' report.json   # 打ち切り検出用: 打
 | `pmtu_blackhole` | PMTUD ブラックホール。小さいパケットは通るが、経路 MTU に制限があり ICMP の通知が返らない。 |
 | `udp443_blocked` | TCP・TLS・HTTP は全て正常で HTTP/3 が広告されているのに、UDP 443 (QUIC) がブロックされているように見える。 |
 | `server_slow` | 接続は速いのに、サーバの最初のバイトまでの応答 (TTFB) が遅い。 |
-| `server_down` | TCP 接続が全て拒否された。サーバが落ちているか、ポートが閉じている。 |
+| `server_down` | 全 IP の TCP プローブが拒否された。サーバが落ちているか、ポートが閉じている。 |
 | `no_problem` | 問題は見つからなかった。 |
 
-表の各行は独立した条件ではありません。判定ロジックの上から順に調べ、最初に当てはまったものが報告されます。例えば、ローカルとパブリックの IP 集合に重なりが無ければ、全 TCP 接続が拒否されていても `server_down` ではなく `dns_answer_mismatch` になります。
+表の各行は独立した条件ではありません。判定ロジックの順 (上の表の並び順とは異なります) に調べ、最初に当てはまったものが報告されます。冒頭の順序は `name_does_not_exist`、`local_dns_broken`、`tcp_blocked` (DNS が全滅)、`dns_answer_mismatch`、続いて `server_down` / `tcp_blocked` (TCP 全滅)、残りのコードはその後です。例えば、ローカルとパブリックの IP 集合に重なりが無ければ、全 TCP 接続が拒否されていても `server_down` ではなく `dns_answer_mismatch` になります。
 
 終了コードとの関係: `no_problem` の終了コードは `0` です (犯人が見つかる前に打ち切られた場合は `3`)。それ以外の値は全て `1` です。
 
