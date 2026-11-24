@@ -12,15 +12,18 @@ use serde::Serialize;
 /// 犯人カテゴリ
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Culprit {
-    /// ローカル DNS が死んでいる (パブリックは動く)
+    /// ローカル系リゾルバに成功応答が無い (SERVFAIL・NXDOMAIN も失敗扱い) がパブリックは成功
+    /// (全ソース NXDOMAIN なら先に NameDoesNotExist)
     LocalDnsBroken,
     /// ローカル DNS が遅い
     LocalDnsSlow,
-    /// ローカルとパブリックで DNS 回答が異なる
+    /// ローカルとパブリックの成功応答の IP 集合に重なりが無く、かつ全 TCP 接続失敗または TLS 失敗
+    /// (証明書検証失敗も含む。回答が違うだけでは選ばれない)
     DnsAnswerMismatch,
     /// 名前が存在しない (NXDOMAIN) — ネットワークのせいではない
     NameDoesNotExist,
-    /// TCP がタイムアウト (フィルタ/到達不能)
+    /// 全 TCP 接続が失敗し、全てが Refused ではない (タイムアウト等を含む)。
+    /// DNS が NXDOMAIN 以外でどこからも引けない場合 (外向き通信が全滅に見える) もここ
     TcpBlocked,
     /// IPv6 経路が壊れている (IPv4 は正常)
     Ipv6Broken,
