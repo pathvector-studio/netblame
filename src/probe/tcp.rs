@@ -150,4 +150,127 @@ mod tests {
         assert!(picked.iter().any(|ip| ip.is_ipv6()));
         assert!(picked.iter().any(|ip| ip.is_ipv4()));
     }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn pick_targets_dedups_keeping_first_seen_order() {
+        // 重複は1回だけ、順序は初出順（v4 同士、v6 同士の相対順）
+        let ips = vec![
+            ip("1.2.3.5"),
+            ip("1.2.3.4"),
+            ip("1.2.3.5"),
+            ip("2606:2800::1"),
+            ip("1.2.3.4"),
+            ip("2606:2800::1"),
+        ];
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("1.2.3.5"), ip("2606:2800::1"), ip("1.2.3.4")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_dedups_same_ip_repeated() {
+        let ips = vec![ip("1.2.3.4"), ip("1.2.3.4"), ip("1.2.3.4")];
+        assert_eq!(pick_targets(&ips), vec![ip("1.2.3.4")]);
+    }
+
+    #[test]
+    fn pick_targets_interleaves_v4_then_v6() {
+        // v4 a,b,c と v6 x,y,z → [a, x, b]（3件で打ち切り）
+        let ips = vec![
+            ip("1.2.3.4"),
+            ip("1.2.3.5"),
+            ip("1.2.3.6"),
+            ip("2606:2800::1"),
+            ip("2606:2800::2"),
+            ip("2606:2800::3"),
+        ];
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("1.2.3.4"), ip("2606:2800::1"), ip("1.2.3.5")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_v6_first_in_input_still_starts_with_v4() {
+        // 入力で v6 が先でも出力は v4 が先頭、v6 は1本含まれる
+        let ips = vec![
+            ip("2606:2800::1"),
+            ip("2606:2800::2"),
+            ip("2606:2800::3"),
+            ip("1.2.3.4"),
+            ip("1.2.3.5"),
+            ip("1.2.3.6"),
+        ];
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("1.2.3.4"), ip("2606:2800::1"), ip("1.2.3.5")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_single_v4_fills_with_v6() {
+        // v4 が1件だけなら残りは v6 で埋まる
+        let ips = vec![
+            ip("2606:2800::1"),
+            ip("2606:2800::2"),
+            ip("2606:2800::3"),
+            ip("1.2.3.4"),
+        ];
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("1.2.3.4"), ip("2606:2800::1"), ip("2606:2800::2")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_v4_only_takes_first_three() {
+        let ips: Vec<IpAddr> = (1..=5).map(|n| ip(&format!("1.2.3.{n}"))).collect();
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("1.2.3.1"), ip("1.2.3.2"), ip("1.2.3.3")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_v6_only_takes_first_three() {
+        let ips: Vec<IpAddr> = (1..=5).map(|n| ip(&format!("2606:2800::{n}"))).collect();
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("2606:2800::1"), ip("2606:2800::2"), ip("2606:2800::3")]
+        );
+    }
+
+    #[test]
+    fn pick_targets_never_exceeds_three() {
+        // v4/v6 の件数を変えても常に3件以下
+        for n4 in 0..=6u32 {
+            for n6 in 0..=6u32 {
+                let mut ips: Vec<IpAddr> = (1..=n4).map(|n| ip(&format!("1.2.3.{n}"))).collect();
+                ips.extend((1..=n6).map(|n| ip(&format!("2606:2800::{n}"))));
+                let picked = pick_targets(&ips);
+                assert!(picked.len() <= 3, "n4={n4} n6={n6}: {picked:?}");
+                assert_eq!(picked.len(), (n4 + n6).min(3) as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn pick_targets_two_or_fewer_returns_all() {
+        let ips = vec![ip("1.2.3.4"), ip("2606:2800::1")];
+        assert_eq!(pick_targets(&ips), vec![ip("1.2.3.4"), ip("2606:2800::1")]);
+        // v6 が先に入力されても v4 → v6 の順で返る
+        let ips = vec![ip("2606:2800::1"), ip("1.2.3.4")];
+        assert_eq!(pick_targets(&ips), vec![ip("1.2.3.4"), ip("2606:2800::1")]);
+        assert_eq!(pick_targets(&[ip("1.2.3.4")]), vec![ip("1.2.3.4")]);
+    }
+
+    #[test]
+    fn pick_targets_empty_returns_empty() {
+        assert!(pick_targets(&[]).is_empty());
+    }
 }
