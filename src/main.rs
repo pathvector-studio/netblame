@@ -1411,6 +1411,75 @@ mod tests {
             .any(|d| d.stage == StageName::Env));
     }
 
+    /// Ctrl-C 打ち切りの終了コードは、env ステージの中身 (問題あり・なし) に
+    /// 関わらず必ず 3 になる。`interrupted_report` は env 以外のステージを
+    /// 空 (DnsReport/TcpReport のデフォルト、他は None) にするため、`judge` の
+    /// 主判定ルール (DNS・TCP・TLS・HTTP・経路・QUIC・トレースのいずれかの
+    /// 結果が前提) はどれも発火せず、env が何を持っていても culprit は
+    /// NoProblem のまま (hosts 上書き・プロキシ変数は副次所見にしかならない)。
+    /// `completeness.complete == false` との組み合わせで exit_code は 3 になる。
+    /// ここでは env が「怪しい」状態 (ネームサーバなし・hosts 上書き・プロキシ
+    /// 変数あり) を合成して、その不変条件を固定する。
+    #[test]
+    fn interrupted_report_with_suspicious_env_still_exits_3() {
+        let target = parse_target("example.com:443").unwrap();
+        let suspicious_envs = [
+            // resolv.conf にネームサーバがない (DNS リゾルバ設定なし)
+            report::EnvReport::default(),
+            // hosts でターゲットが上書きされている
+            report::EnvReport {
+                hosts_override: Some("127.0.0.1".into()),
+                ..Default::default()
+            },
+            // プロキシ変数あり (ProxyInterference は TCP/HTTP 結果が前提)
+            report::EnvReport {
+                proxies: vec![("https_proxy".into(), "http://proxy.corp:8080".into())],
+                no_proxy: Some("localhost".into()),
+                ..Default::default()
+            },
+            // 全部入り
+            report::EnvReport {
+                nameservers: Vec::new(),
+                search_domains: vec!["corp.example".into()],
+                hosts_override: Some("127.0.0.1".into()),
+                proxies: vec![("http_proxy".into(), "http://proxy.corp:8080".into())],
+                no_proxy: None,
+            },
+        ];
+        for env in suspicious_envs {
+            let mut stages = StageTracker::new();
+            let env_for_run = env.clone();
+            let env_report = stages.record_sync(StageName::Env, move || env_for_run);
+            let (report, verdict) = truncated_report(
+                &target,
+                env_report,
+                report::DnsReport::default(),
+                report::TcpReport::default(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                stages,
+                TruncationReason::Interrupted,
+            );
+            assert!(!report.completeness.complete, "env = {env:?}");
+            assert_eq!(report.completeness.ran_stages, vec![StageName::Env]);
+            assert_eq!(verdict.culprit, Culprit::NoProblem, "env = {env:?}");
+            assert_eq!(exit_code(&report, &verdict), 3, "env = {env:?}");
+        }
+    }
+
+    /// 実際の `interrupted_report` (本物の env 読み取り) 経由でも、
+    /// ホストの resolv.conf / hosts / プロキシ環境変数が何であれ終了コードは 3。
+    #[test]
+    fn interrupted_report_exit_code_is_3() {
+        let target = parse_target("192.0.2.1:9999").unwrap();
+        let (report, verdict) = interrupted_report(&target);
+        assert_eq!(verdict.culprit, Culprit::NoProblem);
+        assert_eq!(exit_code(&report, &verdict), 3);
+    }
+
     /// デッドラインが TCP ステージの完了後・Path ステージの前に切れる場合:
     /// TCP は最後まで実行されて結果 (今回はタイムアウト) が残り、Path 以降は
     /// スキップされる。TCP 全滅は judge の主犯確定ルールなので、打ち切られて
