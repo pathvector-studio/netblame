@@ -57,6 +57,31 @@ async fn connect_once(addr: SocketAddr, timeout: Duration) -> Result<f64, TcpOut
     }
 }
 
+/// IP 内の outcome 集約規則。
+///
+/// - 成功が1回でもあれば `Ok` (失敗が混ざっていても `Ok`)
+/// - 全失敗なら、`Refused` が1つでもあれば `Refused`、なければ `Timeout` が
+///   1つでもあれば `Timeout` (失敗の並び順には依らない)
+/// - どちらもなければ最初の失敗 (`Error(..)`)
+/// - 失敗も0件 (samples=0) なら `Error(probe_no_attempts)`
+fn aggregate_outcome(successes: u32, failures: Vec<TcpOutcome>, lang: Lang) -> TcpOutcome {
+    if successes > 0 {
+        TcpOutcome::Ok
+    } else {
+        // 失敗の最頻値 (refused 優先で分類が明確なものを選ぶ)
+        if failures.contains(&TcpOutcome::Refused) {
+            TcpOutcome::Refused
+        } else if failures.contains(&TcpOutcome::Timeout) {
+            TcpOutcome::Timeout
+        } else {
+            failures
+                .into_iter()
+                .next()
+                .unwrap_or(TcpOutcome::Error(i18n::probe_no_attempts(lang)))
+        }
+    }
+}
+
 /// 1つの IP に対して samples 回接続を試す
 pub async fn probe_ip(
     ip: IpAddr,
@@ -80,21 +105,7 @@ pub async fn probe_ip(
     }
 
     let successes = times.len() as u32;
-    let outcome = if successes > 0 {
-        TcpOutcome::Ok
-    } else {
-        // 失敗の最頻値 (refused 優先で分類が明確なものを選ぶ)
-        if failures.contains(&TcpOutcome::Refused) {
-            TcpOutcome::Refused
-        } else if failures.contains(&TcpOutcome::Timeout) {
-            TcpOutcome::Timeout
-        } else {
-            failures
-                .into_iter()
-                .next()
-                .unwrap_or(TcpOutcome::Error(i18n::probe_no_attempts(lang)))
-        }
-    };
+    let outcome = aggregate_outcome(successes, failures, lang);
 
     let (min_ms, avg_ms, max_ms) = if times.is_empty() {
         (None, None, None)
@@ -272,5 +283,74 @@ mod tests {
     #[test]
     fn pick_targets_empty_returns_empty() {
         assert!(pick_targets(&[]).is_empty());
+    }
+
+    fn err(s: &str) -> TcpOutcome {
+        TcpOutcome::Error(s.to_string())
+    }
+
+    #[test]
+    fn aggregate_outcome_any_success_is_ok_even_with_mixed_failures() {
+        let failures = vec![TcpOutcome::Refused, TcpOutcome::Timeout, err("x")];
+        assert_eq!(aggregate_outcome(1, failures, Lang::En), TcpOutcome::Ok);
+    }
+
+    #[test]
+    fn aggregate_outcome_all_refused_is_refused() {
+        let failures = vec![TcpOutcome::Refused, TcpOutcome::Refused];
+        assert_eq!(
+            aggregate_outcome(0, failures, Lang::En),
+            TcpOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn aggregate_outcome_timeout_then_refused_is_refused() {
+        let failures = vec![TcpOutcome::Timeout, TcpOutcome::Refused];
+        assert_eq!(
+            aggregate_outcome(0, failures, Lang::En),
+            TcpOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn aggregate_outcome_error_then_refused_is_refused() {
+        let failures = vec![err("a"), TcpOutcome::Refused];
+        assert_eq!(
+            aggregate_outcome(0, failures, Lang::En),
+            TcpOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn aggregate_outcome_error_then_timeout_is_timeout() {
+        let failures = vec![err("a"), TcpOutcome::Timeout];
+        assert_eq!(
+            aggregate_outcome(0, failures, Lang::En),
+            TcpOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn aggregate_outcome_all_timeout_is_timeout() {
+        let failures = vec![TcpOutcome::Timeout, TcpOutcome::Timeout];
+        assert_eq!(
+            aggregate_outcome(0, failures, Lang::En),
+            TcpOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn aggregate_outcome_errors_only_returns_first_error() {
+        let failures = vec![err("a"), err("b")];
+        assert_eq!(aggregate_outcome(0, failures, Lang::En), err("a"));
+    }
+
+    #[test]
+    fn aggregate_outcome_no_attempts_is_no_attempts_error() {
+        assert_eq!(
+            aggregate_outcome(0, vec![], Lang::En),
+            TcpOutcome::Error(i18n::probe_no_attempts(Lang::En))
+        );
     }
 }
