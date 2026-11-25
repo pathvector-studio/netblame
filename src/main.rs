@@ -1391,10 +1391,12 @@ mod tests {
     /// Ctrl-C による打ち切りレポート: env だけが実行済みステージとして記録され、
     /// それ以外 (Dns/Tcp など) は未実行になる。env は /etc 配下と環境変数しか
     /// 読まず実ネットワークに依存しないので決定的。
+    /// 本物の env 読み取り経由でも、ホストの resolv.conf / hosts / プロキシ
+    /// 環境変数が何であれ終了コードは 3 (culprit は NoProblem のまま)。
     #[test]
     fn interrupted_report_records_env_stage() {
         let target = parse_target("192.0.2.1:9999").unwrap();
-        let (report, _verdict) = interrupted_report(&target);
+        let (report, verdict) = interrupted_report(&target);
 
         assert!(!report.completeness.complete);
         assert_eq!(
@@ -1409,6 +1411,8 @@ mod tests {
             .stage_durations
             .iter()
             .any(|d| d.stage == StageName::Env));
+        assert_eq!(verdict.culprit, Culprit::NoProblem);
+        assert_eq!(exit_code(&report, &verdict), 3);
     }
 
     /// Ctrl-C 打ち切りの終了コードは、env ステージの中身 (問題あり・なし) に
@@ -1419,7 +1423,7 @@ mod tests {
     /// NoProblem のまま (hosts 上書き・プロキシ変数は副次所見にしかならない)。
     /// `completeness.complete == false` との組み合わせで exit_code は 3 になる。
     /// ここでは env が「怪しい」状態 (ネームサーバなし・hosts 上書き・プロキシ
-    /// 変数あり) を合成して、その不変条件を固定する。
+    /// 変数あり、およびネームサーバありでの hosts 上書き＋プロキシ) を合成して、その不変条件を固定する。
     #[test]
     fn interrupted_report_with_suspicious_env_still_exits_3() {
         let target = parse_target("example.com:443").unwrap();
@@ -1437,9 +1441,9 @@ mod tests {
                 no_proxy: Some("localhost".into()),
                 ..Default::default()
             },
-            // 全部入り
+            // ネームサーバあり＋hosts 上書き＋プロキシ
             report::EnvReport {
-                nameservers: Vec::new(),
+                nameservers: vec!["192.0.2.53".parse().unwrap()],
                 search_domains: vec!["corp.example".into()],
                 hosts_override: Some("127.0.0.1".into()),
                 proxies: vec![("http_proxy".into(), "http://proxy.corp:8080".into())],
@@ -1468,16 +1472,6 @@ mod tests {
             assert_eq!(verdict.culprit, Culprit::NoProblem, "env = {env:?}");
             assert_eq!(exit_code(&report, &verdict), 3, "env = {env:?}");
         }
-    }
-
-    /// 実際の `interrupted_report` (本物の env 読み取り) 経由でも、
-    /// ホストの resolv.conf / hosts / プロキシ環境変数が何であれ終了コードは 3。
-    #[test]
-    fn interrupted_report_exit_code_is_3() {
-        let target = parse_target("192.0.2.1:9999").unwrap();
-        let (report, verdict) = interrupted_report(&target);
-        assert_eq!(verdict.culprit, Culprit::NoProblem);
-        assert_eq!(exit_code(&report, &verdict), 3);
     }
 
     /// デッドラインが TCP ステージの完了後・Path ステージの前に切れる場合:
