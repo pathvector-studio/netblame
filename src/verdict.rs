@@ -16,13 +16,15 @@ pub enum Culprit {
     LocalDnsBroken,
     /// ローカル DNS が遅い
     LocalDnsSlow,
-    /// ローカルとパブリックの成功応答の IP 集合に重なりが無く、かつ全 TCP 接続失敗または TLS 失敗
+    /// ローカルとパブリックの成功応答の IP 集合に重なりが無く、かつプローブした全 IP で TCP 失敗、
+    /// または TLS 失敗
     /// (証明書検証失敗も含む。回答が違うだけでは選ばれない)
     DnsAnswerMismatch,
     /// 名前が存在しない (NXDOMAIN) — ネットワークのせいではない
     NameDoesNotExist,
-    /// 全 IP の TCP プローブが失敗し、IP ごとの結果 (outcome) が全て Refused ではない
-    /// (1 つの IP 内で Refused とタイムアウトが混ざった試行は、その IP では Refused 扱い)。
+    /// プローブした全 IP (最大 3 つ) で TCP プローブが失敗し、IP ごとの結果 (outcome) が全て Refused ではない。
+    /// 1 つの IP 内では、全試行が失敗した場合に Refused が 1 回でもあればその IP は Refused、
+    /// なければタイムアウトが 1 回でもあれば Timeout、どちらもなければ最初のエラー (`probe_ip`)。
     /// ローカルとパブリックの IP 集合に重なりが無ければ先に DnsAnswerMismatch。
     /// DNS が NXDOMAIN 以外でどこからも引けない場合 (外向き通信が全滅に見える) もここ
     TcpBlocked,
