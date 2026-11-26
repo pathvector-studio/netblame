@@ -96,4 +96,23 @@ mod tests {
         assert!(d.expired());
         assert_eq!(d.remaining(), Duration::ZERO);
     }
+
+    // 以下は `from_millis` を使った判定の固定。実時間に依存しないよう、
+    // 0 (= 構築直後から期限切れ) と十分大きい値 (= 期限内) の対比だけにする。
+
+    #[test]
+    fn from_millis_zero_is_expired() {
+        let d = Deadline::from_millis(0);
+        assert!(d.expired());
+        assert_eq!(d.remaining(), Duration::ZERO);
+        assert!(should_stop(Some(&d)));
+    }
+
+    #[test]
+    fn from_millis_large_is_not_expired() {
+        let d = Deadline::from_millis(60_000);
+        assert!(!d.expired());
+        assert!(d.remaining() > Duration::ZERO);
+        assert!(!should_stop(Some(&d)));
+    }
 }
