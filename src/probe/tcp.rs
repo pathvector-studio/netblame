@@ -62,13 +62,13 @@ async fn connect_once(addr: SocketAddr, timeout: Duration) -> Result<f64, TcpOut
 /// - 成功が1回でもあれば `Ok` (失敗が混ざっていても `Ok`)
 /// - 全失敗なら、`Refused` が1つでもあれば `Refused`、なければ `Timeout` が
 ///   1つでもあれば `Timeout` (この判定は失敗の並び順に依らない)
-/// - どちらもなければ(`Error(..)` のみ)並びの先頭の失敗を返す (こちらは順序に依存する)
+/// - どちらもなければ(`Error(..)` のみ)試行順で最初の失敗を返す (こちらは順序に依存する)
 /// - 失敗も0件 (samples=0) なら `Error(probe_no_attempts)`
 fn aggregate_outcome(successes: u32, failures: Vec<TcpOutcome>, lang: Lang) -> TcpOutcome {
     if successes > 0 {
         TcpOutcome::Ok
     } else {
-        // 全失敗: 件数ではなく優先順位で選ぶ (Refused > Timeout > 最初の失敗)
+        // 全失敗: 件数ではなく優先順位で選ぶ (Refused > Timeout > 最初の Error)
         if failures.contains(&TcpOutcome::Refused) {
             TcpOutcome::Refused
         } else if failures.contains(&TcpOutcome::Timeout) {
@@ -188,6 +188,17 @@ mod tests {
     fn pick_targets_dedups_same_ip_repeated() {
         let ips = vec![ip("1.2.3.4"), ip("1.2.3.4"), ip("1.2.3.4")];
         assert_eq!(pick_targets(&ips), vec![ip("1.2.3.4")]);
+    }
+
+    #[test]
+    fn pick_targets_dedups_v6_only_input() {
+        // v4 を含まない入力でも v6 の重複は畳まれる（出力に効く形で固定）。
+        // 重複除去がないと [::1, ::1, ::2] のまま3件返ってしまう。
+        let ips = vec![ip("2001:db8::1"), ip("2001:db8::1"), ip("2001:db8::2")];
+        assert_eq!(
+            pick_targets(&ips),
+            vec![ip("2001:db8::1"), ip("2001:db8::2")]
+        );
     }
 
     #[test]
