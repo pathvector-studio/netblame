@@ -229,4 +229,46 @@ mod tests {
         assert!(!looks_like_middlebox("CN=DigiCert TLS RSA SHA256 2020 CA1"));
         assert!(!looks_like_middlebox("CN=R11, O=Let's Encrypt"));
     }
+
+    #[test]
+    fn version_name_known_versions() {
+        assert_eq!(version_name(rustls::ProtocolVersion::TLSv1_2), "TLS 1.2");
+        assert_eq!(version_name(rustls::ProtocolVersion::TLSv1_3), "TLS 1.3");
+    }
+
+    #[test]
+    fn version_name_other_versions_use_debug_format() {
+        let v = rustls::ProtocolVersion::TLSv1_0;
+        assert_eq!(version_name(v), format!("{v:?}"));
+        assert_eq!(version_name(v), "TLSv1_0");
+        let unknown = rustls::ProtocolVersion::Unknown(0x1234);
+        assert_eq!(version_name(unknown), format!("{unknown:?}"));
+    }
+
+    #[test]
+    fn inspect_cert_rejects_invalid_der() {
+        assert_eq!(inspect_cert(&[]), (None, None, false));
+        assert_eq!(
+            inspect_cert(b"this is not a certificate"),
+            (None, None, false)
+        );
+        // SEQUENCE タグだが長さが実体より長い (切り詰められた DER)
+        assert_eq!(inspect_cert(&[0x30, 0x82, 0x01, 0x00]), (None, None, false));
+    }
+
+    #[test]
+    fn middlebox_detection_is_case_insensitive() {
+        assert!(looks_like_middlebox("CN=ZSCALER ROOT CA"));
+        assert!(looks_like_middlebox("cn=zscaler root ca"));
+        assert!(looks_like_middlebox("O=Palo Alto Networks"));
+        assert!(looks_like_middlebox("O=BLUE COAT SYSTEMS"));
+    }
+
+    #[test]
+    fn middlebox_detection_matches_generic_keywords() {
+        assert!(looks_like_middlebox("CN=Corporate Proxy CA"));
+        assert!(looks_like_middlebox("CN=Example Firewall CA"));
+        assert!(looks_like_middlebox("CN=SSL Inspection CA"));
+        assert!(!looks_like_middlebox(""));
+    }
 }
