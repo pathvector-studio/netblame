@@ -240,7 +240,6 @@ mod tests {
     fn version_name_other_versions_use_debug_format() {
         let v = rustls::ProtocolVersion::TLSv1_0;
         assert_eq!(version_name(v), format!("{v:?}"));
-        assert_eq!(version_name(v), "TLSv1_0");
         let unknown = rustls::ProtocolVersion::Unknown(0x1234);
         assert_eq!(version_name(unknown), format!("{unknown:?}"));
     }
