@@ -222,3 +222,88 @@ pub async fn run(
         skipped: false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_resolver::net::NoRecords;
+    use hickory_resolver::proto::op::Query;
+
+    fn no_records(code: ResponseCode) -> NetError {
+        NetError::Dns(DnsError::NoRecordsFound(NoRecords::new(Query::new(), code)))
+    }
+
+    #[test]
+    fn classify_error_timeout() {
+        assert_eq!(
+            classify_error(&NetError::Timeout, Lang::En),
+            DnsOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_error_no_records_nxdomain() {
+        // NoRecordsFound でも rcode が NXDOMAIN のときだけ NxDomain になる
+        assert_eq!(
+            classify_error(&no_records(ResponseCode::NXDomain), Lang::En),
+            DnsOutcome::NxDomain
+        );
+    }
+
+    #[test]
+    fn classify_error_no_records_other_rcode_is_error() {
+        // NoError (名前はあるが該当型のレコードなし) は NXDOMAIN ではなく Error。
+        // メッセージは i18n で変わりうるので、変種と rcode 文字列の有無だけ確認する
+        for lang in [Lang::En, Lang::Ja] {
+            match classify_error(&no_records(ResponseCode::NoError), lang) {
+                DnsOutcome::Error(msg) => assert!(
+                    msg.contains(&ResponseCode::NoError.to_string()),
+                    "rcode が含まれていない: {msg}"
+                ),
+                other => panic!("Error になるはず: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_error_response_code_servfail() {
+        assert_eq!(
+            classify_error(
+                &NetError::Dns(DnsError::ResponseCode(ResponseCode::ServFail)),
+                Lang::En
+            ),
+            DnsOutcome::ServFail
+        );
+    }
+
+    #[test]
+    fn classify_error_response_code_other_is_error() {
+        // ServFail 以外 (例: Refused) は ServFail に畳まず Error にする
+        for lang in [Lang::En, Lang::Ja] {
+            match classify_error(
+                &NetError::Dns(DnsError::ResponseCode(ResponseCode::Refused)),
+                lang,
+            ) {
+                DnsOutcome::Error(msg) => assert!(
+                    msg.contains(&ResponseCode::Refused.to_string()),
+                    "rcode が含まれていない: {msg}"
+                ),
+                other => panic!("Error になるはず: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_error_other_kinds_use_display_message() {
+        // 上記以外の種別は Display 文字列がそのまま Error に入る
+        // (文言そのものは hickory 側の都合で変わりうるので to_string() と突き合わせる)
+        assert_eq!(
+            classify_error(&NetError::NoConnections, Lang::En),
+            DnsOutcome::Error(NetError::NoConnections.to_string())
+        );
+        assert_eq!(
+            classify_error(&NetError::Msg("boom".to_string()), Lang::Ja),
+            DnsOutcome::Error("boom".to_string())
+        );
+    }
+}
