@@ -61,14 +61,14 @@ async fn connect_once(addr: SocketAddr, timeout: Duration) -> Result<f64, TcpOut
 ///
 /// - 成功が1回でもあれば `Ok` (失敗が混ざっていても `Ok`)
 /// - 全失敗なら、`Refused` が1つでもあれば `Refused`、なければ `Timeout` が
-///   1つでもあれば `Timeout` (失敗の並び順には依らない)
-/// - どちらもなければ最初の失敗 (`Error(..)`)
+///   1つでもあれば `Timeout` (この判定は失敗の並び順に依らない)
+/// - どちらもなければ(`Error(..)` のみ)並びの先頭の失敗を返す (こちらは順序に依存する)
 /// - 失敗も0件 (samples=0) なら `Error(probe_no_attempts)`
 fn aggregate_outcome(successes: u32, failures: Vec<TcpOutcome>, lang: Lang) -> TcpOutcome {
     if successes > 0 {
         TcpOutcome::Ok
     } else {
-        // 失敗の最頻値 (refused 優先で分類が明確なものを選ぶ)
+        // 全失敗: 件数ではなく優先順位で選ぶ (Refused > Timeout > 最初の失敗)
         if failures.contains(&TcpOutcome::Refused) {
             TcpOutcome::Refused
         } else if failures.contains(&TcpOutcome::Timeout) {
