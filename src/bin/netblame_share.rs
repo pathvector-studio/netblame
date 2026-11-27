@@ -235,3 +235,258 @@ async fn get_report_html(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         None => (StatusCode::NOT_FOUND, Html(render_not_found_page(Lang::Ja))).into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+
+    fn peer() -> SocketAddr {
+        "203.0.113.9:54321".parse().unwrap()
+    }
+
+    fn peer_ip() -> IpAddr {
+        peer().ip()
+    }
+
+    fn headers_with(name: &'static str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(name, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    fn xff(value: &str) -> HeaderMap {
+        headers_with("x-forwarded-for", value)
+    }
+
+    fn state_with(public_url: Option<&str>) -> AppState {
+        AppState {
+            data_dir: PathBuf::from("./unused"),
+            max_body_bytes: 0,
+            retention_days: 0,
+            public_url: public_url.map(str::to_string),
+            limiter: SlidingWindowLimiter::new(1, Duration::from_secs(60)),
+        }
+    }
+
+    #[test]
+    fn client_ip_without_header_uses_peer() {
+        assert_eq!(client_ip(&HeaderMap::new(), peer()), peer_ip());
+    }
+
+    #[test]
+    fn client_ip_single_forwarded_ip_wins_over_peer() {
+        // X-Forwarded-For は無条件に信頼される（peer が誰でも採用）
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(client_ip(&xff("198.51.100.7"), peer()), ip);
+    }
+
+    #[test]
+    fn client_ip_takes_first_of_comma_separated_list() {
+        // 先頭（クライアント側）を採り、後続のプロキシ段は無視する
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(
+            client_ip(&xff("198.51.100.7, 10.0.0.1, 10.0.0.2"), peer()),
+            ip
+        );
+        assert_eq!(client_ip(&xff("198.51.100.7,10.0.0.1"), peer()), ip);
+    }
+
+    #[test]
+    fn client_ip_trims_surrounding_whitespace() {
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(client_ip(&xff("  198.51.100.7  "), peer()), ip);
+        assert_eq!(client_ip(&xff("\t198.51.100.7 \t, 10.0.0.1"), peer()), ip);
+    }
+
+    #[test]
+    fn client_ip_invalid_first_entry_falls_back_to_peer() {
+        // 先頭が不正なら 2 番目以降が妥当でも peer（次の要素は探さない）
+        assert_eq!(client_ip(&xff("unknown, 198.51.100.7"), peer()), peer_ip());
+        assert_eq!(client_ip(&xff("not-an-ip"), peer()), peer_ip());
+        assert_eq!(client_ip(&xff("999.1.1.1"), peer()), peer_ip());
+    }
+
+    #[test]
+    fn client_ip_empty_or_blank_value_falls_back_to_peer() {
+        assert_eq!(client_ip(&xff(""), peer()), peer_ip());
+        assert_eq!(client_ip(&xff("   "), peer()), peer_ip());
+        // 先頭が空要素なら 2 番目が妥当でも peer
+        assert_eq!(client_ip(&xff(", 198.51.100.7"), peer()), peer_ip());
+    }
+
+    #[test]
+    fn client_ip_with_port_or_brackets_falls_back_to_peer() {
+        // IpAddr としてパースできない形式（ポート付き・角括弧付き）は不正扱い
+        assert_eq!(client_ip(&xff("198.51.100.7:8080"), peer()), peer_ip());
+        assert_eq!(client_ip(&xff("[2001:db8::1]"), peer()), peer_ip());
+        assert_eq!(client_ip(&xff("[2001:db8::1]:8080"), peer()), peer_ip());
+    }
+
+    #[test]
+    fn client_ip_parses_ipv6_forwarded_value() {
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(client_ip(&xff("2001:db8::1"), peer()), ip);
+        assert_eq!(client_ip(&xff("2001:db8::1, 10.0.0.1"), peer()), ip);
+        let lo: IpAddr = "::1".parse().unwrap();
+        assert_eq!(client_ip(&xff("::1"), peer()), lo);
+    }
+
+    #[test]
+    fn client_ip_ipv6_peer_is_returned_as_is() {
+        let p: SocketAddr = "[2001:db8::2]:443".parse().unwrap();
+        assert_eq!(client_ip(&HeaderMap::new(), p), p.ip());
+        assert_eq!(client_ip(&xff("garbage"), p), p.ip());
+    }
+
+    #[test]
+    fn client_ip_non_ascii_header_value_falls_back_to_peer() {
+        // HeaderValue は 0x80 以上のバイトを許すが、to_str は可視 ASCII のみ通すので peer へ
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_bytes(b"198.51.100.7\xff").unwrap(),
+        );
+        assert_eq!(client_ip(&h, peer()), peer_ip());
+
+        // 妥当な UTF-8 でも非 ASCII を含めば同様（先頭が妥当な IP でも採用されない）
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_bytes("198.51.100.7, é".as_bytes()).unwrap(),
+        );
+        assert_eq!(client_ip(&h, peer()), peer_ip());
+    }
+
+    #[test]
+    fn client_ip_header_name_is_case_insensitive() {
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            HeaderName::from_bytes(b"X-Forwarded-For").unwrap(),
+            HeaderValue::from_static("198.51.100.7"),
+        );
+        assert_eq!(client_ip(&h, peer()), ip);
+    }
+
+    #[test]
+    fn client_ip_uses_only_first_of_repeated_headers() {
+        // 同名ヘッダが複数あっても HeaderMap::get は最初の 1 本だけを返す
+        let mut h = HeaderMap::new();
+        h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.7"));
+        h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.8"));
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(client_ip(&h, peer()), ip);
+    }
+
+    #[test]
+    fn client_ip_ignores_other_proxy_headers() {
+        // X-Real-IP / Forwarded は見ない
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("198.51.100.7"));
+        h.insert("forwarded", HeaderValue::from_static("for=198.51.100.8"));
+        assert_eq!(client_ip(&h, peer()), peer_ip());
+    }
+
+    #[test]
+    fn public_base_url_prefers_configured_value() {
+        let s = state_with(Some("https://share.example.com"));
+        // 設定があれば Host ヘッダは無視される
+        let h = headers_with("host", "internal:8788");
+        assert_eq!(public_base_url(&s, &h), "https://share.example.com");
+        assert_eq!(
+            public_base_url(&s, &HeaderMap::new()),
+            "https://share.example.com"
+        );
+    }
+
+    #[test]
+    fn public_base_url_trims_trailing_slashes_of_configured_value() {
+        let s = state_with(Some("https://share.example.com/"));
+        assert_eq!(
+            public_base_url(&s, &HeaderMap::new()),
+            "https://share.example.com"
+        );
+        // 複数のスラッシュもまとめて落とす
+        let s = state_with(Some("https://share.example.com///"));
+        assert_eq!(
+            public_base_url(&s, &HeaderMap::new()),
+            "https://share.example.com"
+        );
+        // パス部分は保持し、末尾だけ落とす
+        let s = state_with(Some("https://example.com/share/"));
+        assert_eq!(
+            public_base_url(&s, &HeaderMap::new()),
+            "https://example.com/share"
+        );
+    }
+
+    #[test]
+    fn public_base_url_configured_value_is_not_otherwise_normalized() {
+        // 空文字列は「設定あり」扱いで、そのまま空の base になる
+        let s = state_with(Some(""));
+        assert_eq!(public_base_url(&s, &HeaderMap::new()), "");
+        // スキーム無し・前後の空白もそのまま
+        let s = state_with(Some("share.example.com"));
+        assert_eq!(public_base_url(&s, &HeaderMap::new()), "share.example.com");
+        let s = state_with(Some(" https://x.example "));
+        assert_eq!(
+            public_base_url(&s, &HeaderMap::new()),
+            " https://x.example "
+        );
+    }
+
+    #[test]
+    fn public_base_url_falls_back_to_http_scheme_with_host_header() {
+        // 現状の実装のスキームは http（https ではない）
+        let s = state_with(None);
+        let h = headers_with("host", "share.example.com");
+        assert_eq!(public_base_url(&s, &h), "http://share.example.com");
+    }
+
+    #[test]
+    fn public_base_url_keeps_port_in_host_header() {
+        let s = state_with(None);
+        let h = headers_with("host", "127.0.0.1:8788");
+        assert_eq!(public_base_url(&s, &h), "http://127.0.0.1:8788");
+    }
+
+    #[test]
+    fn public_base_url_does_not_trim_host_header() {
+        // Host 由来の値は末尾スラッシュ除去も検証もされず、そのまま埋め込まれる
+        let s = state_with(None);
+        let h = headers_with("host", "share.example.com/");
+        assert_eq!(public_base_url(&s, &h), "http://share.example.com/");
+    }
+
+    #[test]
+    fn public_base_url_without_host_uses_localhost() {
+        let s = state_with(None);
+        assert_eq!(public_base_url(&s, &HeaderMap::new()), "http://localhost");
+    }
+
+    #[test]
+    fn public_base_url_non_ascii_host_uses_localhost() {
+        let s = state_with(None);
+        let mut h = HeaderMap::new();
+        h.insert(
+            "host",
+            HeaderValue::from_bytes(b"share\xff.example").unwrap(),
+        );
+        assert_eq!(public_base_url(&s, &h), "http://localhost");
+    }
+
+    #[test]
+    fn public_base_url_ignores_x_forwarded_headers() {
+        // X-Forwarded-Host / X-Forwarded-Proto は見ない
+        let s = state_with(None);
+        let mut h = HeaderMap::new();
+        h.insert("host", HeaderValue::from_static("internal:8788"));
+        h.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("share.example.com"),
+        );
+        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(public_base_url(&s, &h), "http://internal:8788");
+    }
+}
