@@ -362,8 +362,9 @@ mod tests {
     use super::*;
     use serde_json::{json, to_value};
 
-    /// 全変種の一覧。下の `exhaustive` が match で網羅しているので、
-    /// 変種を追加するとここを直すまでコンパイルが通らない。
+    /// 全変種の一覧。テストはこの配列を回して検証する。
+    /// 注意: この配列自体は網羅性を検査されない (追加漏れはコンパイルでは検知できない)。
+    /// 新変種の追加時にコンパイルエラーで気づかせる役目は、下の `exhaustive` の match が負う。
     const ALL_STAGES: [StageName; 8] = [
         StageName::Env,
         StageName::Dns,
@@ -375,6 +376,10 @@ mod tests {
         StageName::Trace,
     ];
 
+    /// `StageName` に変種を足すと、この match が非網羅になりコンパイルエラーになる。
+    /// その時に上の `ALL_STAGES` (と `stage_name_values_are_fixed_snake_case` の期待値) も
+    /// 更新する、という合図のための関数 (実行はされない)。本番の `as_str` の match も網羅的だが、
+    /// 将来 `as_str` が `_ =>` などになってもこのテスト側の検知が残るよう、独立して持っている。
     #[allow(dead_code)]
     fn exhaustive(s: StageName) {
         match s {

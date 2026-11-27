@@ -47,6 +47,12 @@ CI で `--watch` は使わないでください。Ctrl-C まで診断を繰り�
 | `.report.completeness.truncated_reason` | `null`、`"max_time_exceeded"`、`"interrupted"` のいずれか。 |
 | `.report.completeness.ran_stages`、`.skipped_stages` | ステージ名 (`env`、`dns`、`tcp`、`tls`、`http`、`quic`、`path`、`trace`) の配列。 |
 | `.report.stage_durations` | `{"stage": "...", "ms": 12.3}` の配列 (実行順)。 |
+| `.report.dns.sources[].outcome` | DNS の 1 ソースの結果: `Ok`、`NxDomain`、`ServFail`、`Timeout`、`Error` のいずれか。 |
+| `.report.tcp.probes[].outcome` | TCP プローブ 1 件の結果: `Ok`、`Refused`、`Timeout`、`Error` のいずれか。 |
+| `.report.quic.outcome` | QUIC ハンドシェイクの結果: `Ok`、`Timeout`、`HandshakeError`、`LocalError` のいずれか。QUIC ステージを実行しなかった場合、`.report.quic` は `null` です。 |
+| `.report.trace.data.mtu_probes[].outcome` | DF ビット付き MTU プローブ 1 発の結果 (`.report.trace.status` が `"Ran"` のときだけ存在): `Silent`、`FragNeeded`、`Delivered`、`LocalError` のいずれか。 |
+
+上の 4 行の `outcome` は、どれも `{"code": "...", "detail": ...}` という同じ形のオブジェクトです。`code` は PascalCase の variant 名で、データを持たない variant には `detail` キーがありません (例: `{"code": "Refused"}`)。`dns`・`tcp`・`quic` の `Error`、`HandshakeError`、`LocalError` は、メッセージを文字列で `detail` に持ちます (例: `{"code": "Error", "detail": "..."}`)。`quic` の `Ok` は `detail` にオブジェクト (`{"code": "Ok", "detail": {"handshake_ms": 12.5, "negotiated_alpn": "h3"}}`) を、`mtu_probes` の `FragNeeded` は `{"mtu": 1400}` (`mtu` は `null` もありえます) を持ちます。`mtu_probes` の `LocalError` に `detail` はありません。なお `.report.trace` 自体は別の形 `{"status": "Ran", "data": {...}}` で、`status` は `Unsupported` (`data` キーなし) や `Failed` (`data` は文字列) にもなります。これらの `code` を `culprit_code` と照合しないでください。別のフィールドで、`culprit_code` は snake_case です。
 
 ```bash
 netblame --json --lang en --max-time 30 https://example.com > report.json || true   # 終了コード 1/3 は結果であり異常ではない (`set -e` 下で必要)。終了コード 2 (使い方・内部エラー) も握りつぶす点に注意
