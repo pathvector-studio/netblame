@@ -278,8 +278,11 @@ Running behind a reverse proxy:
 
 - The client IP used for `--rate-limit` is the first value of the `X-Forwarded-For` header (comma-separated, surrounding whitespace trimmed) if it parses as an IP address; that header is trusted unconditionally. If the header is missing or its first value is not a valid IP, the TCP peer address is used instead (`client_ip` in `src/bin/netblame_share.rs`).
 - So run the server behind a reverse proxy that overwrites `X-Forwarded-For` (discarding whatever the client sent). If it is exposed directly to the internet, a client can forge `X-Forwarded-For` to dodge `--rate-limit`, or to use up the quota of someone else's IP by sending that IP as the first value.
-- If the proxy does not set `X-Forwarded-For`, every request comes from the proxy's own address, so all clients share a single `--rate-limit` quota (one bucket for the proxy's IP).
+- If the proxy does not set `X-Forwarded-For`, what happens depends on whether it strips the header the client sent:
+  - It strips the client's `X-Forwarded-For`: every request comes from the proxy's own address, so all clients share a single `--rate-limit` quota (one bucket for the proxy's IP).
+  - It passes the client's `X-Forwarded-For` through unchanged: the client-supplied first value is trusted as is, so you are back to the forgery problem of direct exposure above.
 - Share links are built from `--public-url` if set (trailing `/` stripped), otherwise from `http://{Host header}` (`http://localhost` if there is no usable Host header, including one that cannot be read as text, e.g. because it contains non-ASCII bytes). If TLS is terminated at the reverse proxy, pass `--public-url https://...`, or the links will come out as `http://`.
+- `X-Forwarded-Host` and `X-Forwarded-Proto` are not consulted (`public_base_url` in `src/bin/netblame_share.rs`). If the proxy rewrites the `Host` header (passing an internal hostname to the backend), pass `--public-url` too, or the links will contain that internal host.
 
 ## Roadmap
 
