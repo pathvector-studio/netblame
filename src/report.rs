@@ -356,3 +356,288 @@ pub struct Report {
     /// ステージ別所要時間 (計測できた分だけ、実行順)
     pub stage_durations: Vec<StageDuration>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    /// 全変種の一覧。下の `exhaustive` が match で網羅しているので、
+    /// 変種を追加するとここを直すまでコンパイルが通らない。
+    const ALL_STAGES: [StageName; 8] = [
+        StageName::Env,
+        StageName::Dns,
+        StageName::Tcp,
+        StageName::Tls,
+        StageName::Http,
+        StageName::Quic,
+        StageName::Path,
+        StageName::Trace,
+    ];
+
+    #[allow(dead_code)]
+    fn exhaustive(s: StageName) {
+        match s {
+            StageName::Env
+            | StageName::Dns
+            | StageName::Tcp
+            | StageName::Tls
+            | StageName::Http
+            | StageName::Quic
+            | StageName::Path
+            | StageName::Trace => {}
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn dns_result(source: DnsSource) -> DnsSourceResult {
+        DnsSourceResult {
+            source,
+            label: String::new(),
+            outcome: DnsOutcome::Ok,
+            ips: vec![],
+            latency_ms: None,
+        }
+    }
+
+    fn tcp_probe(successes: u32) -> TcpProbe {
+        TcpProbe {
+            ip: ip("192.0.2.1"),
+            port: 443,
+            samples: 3,
+            successes,
+            outcome: TcpOutcome::Ok,
+            min_ms: None,
+            avg_ms: None,
+            max_ms: None,
+        }
+    }
+
+    #[test]
+    fn stage_name_json_matches_as_str_for_all_variants() {
+        for s in ALL_STAGES {
+            assert_eq!(to_value(s).unwrap(), json!(s.as_str()), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn stage_name_values_are_fixed_snake_case() {
+        let got: Vec<&str> = ALL_STAGES.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            got,
+            ["env", "dns", "tcp", "tls", "http", "quic", "path", "trace"]
+        );
+    }
+
+    #[test]
+    fn tcp_outcome_json_shape() {
+        assert_eq!(
+            to_value(TcpOutcome::Error("x".into())).unwrap(),
+            json!({"code": "Error", "detail": "x"})
+        );
+        assert_eq!(to_value(TcpOutcome::Ok).unwrap(), json!({"code": "Ok"}));
+        assert_eq!(
+            to_value(TcpOutcome::Refused).unwrap(),
+            json!({"code": "Refused"})
+        );
+        assert_eq!(
+            to_value(TcpOutcome::Timeout).unwrap(),
+            json!({"code": "Timeout"})
+        );
+    }
+
+    #[test]
+    fn dns_outcome_json_shape() {
+        assert_eq!(
+            to_value(DnsOutcome::Error("x".into())).unwrap(),
+            json!({"code": "Error", "detail": "x"})
+        );
+        assert_eq!(to_value(DnsOutcome::Ok).unwrap(), json!({"code": "Ok"}));
+        assert_eq!(
+            to_value(DnsOutcome::NxDomain).unwrap(),
+            json!({"code": "NxDomain"})
+        );
+        assert_eq!(
+            to_value(DnsOutcome::ServFail).unwrap(),
+            json!({"code": "ServFail"})
+        );
+        assert_eq!(
+            to_value(DnsOutcome::Timeout).unwrap(),
+            json!({"code": "Timeout"})
+        );
+    }
+
+    #[test]
+    fn dns_source_json_shape() {
+        assert_eq!(
+            to_value(DnsSource::System).unwrap(),
+            json!({"kind": "System"})
+        );
+        assert_eq!(
+            to_value(DnsSource::Local(ip("192.168.1.1"))).unwrap(),
+            json!({"kind": "Local", "addr": "192.168.1.1"})
+        );
+        assert_eq!(
+            to_value(DnsSource::Public(ip("1.1.1.1"))).unwrap(),
+            json!({"kind": "Public", "addr": "1.1.1.1"})
+        );
+    }
+
+    #[test]
+    fn quic_outcome_json_shape() {
+        assert_eq!(
+            to_value(QuicOutcome::Ok {
+                handshake_ms: 12.5,
+                negotiated_alpn: Some("h3".into()),
+            })
+            .unwrap(),
+            json!({"code": "Ok", "detail": {"handshake_ms": 12.5, "negotiated_alpn": "h3"}})
+        );
+        assert_eq!(
+            to_value(QuicOutcome::Ok {
+                handshake_ms: 1.0,
+                negotiated_alpn: None,
+            })
+            .unwrap(),
+            json!({"code": "Ok", "detail": {"handshake_ms": 1.0, "negotiated_alpn": null}})
+        );
+        assert_eq!(
+            to_value(QuicOutcome::Timeout).unwrap(),
+            json!({"code": "Timeout"})
+        );
+        assert_eq!(
+            to_value(QuicOutcome::HandshakeError("x".into())).unwrap(),
+            json!({"code": "HandshakeError", "detail": "x"})
+        );
+        assert_eq!(
+            to_value(QuicOutcome::LocalError("x".into())).unwrap(),
+            json!({"code": "LocalError", "detail": "x"})
+        );
+    }
+
+    #[test]
+    fn mtu_probe_outcome_json_shape() {
+        assert_eq!(
+            to_value(MtuProbeOutcome::Silent).unwrap(),
+            json!({"code": "Silent"})
+        );
+        assert_eq!(
+            to_value(MtuProbeOutcome::Delivered).unwrap(),
+            json!({"code": "Delivered"})
+        );
+        assert_eq!(
+            to_value(MtuProbeOutcome::LocalError).unwrap(),
+            json!({"code": "LocalError"})
+        );
+        assert_eq!(
+            to_value(MtuProbeOutcome::FragNeeded { mtu: Some(1400) }).unwrap(),
+            json!({"code": "FragNeeded", "detail": {"mtu": 1400}})
+        );
+        assert_eq!(
+            to_value(MtuProbeOutcome::FragNeeded { mtu: None }).unwrap(),
+            json!({"code": "FragNeeded", "detail": {"mtu": null}})
+        );
+    }
+
+    #[test]
+    fn trace_report_json_shape() {
+        assert_eq!(
+            to_value(TraceReport::Unsupported).unwrap(),
+            json!({"status": "Unsupported"})
+        );
+        assert_eq!(
+            to_value(TraceReport::Failed("x".into())).unwrap(),
+            json!({"status": "Failed", "data": "x"})
+        );
+        assert_eq!(
+            to_value(TraceReport::Ran(TraceData::default())).unwrap(),
+            json!({"status": "Ran", "data": {
+                "hops": [],
+                "dest_reached": false,
+                "kernel_mtu": null,
+                "mtu_probes": []
+            }})
+        );
+    }
+
+    #[test]
+    fn truncation_reason_json_is_snake_case() {
+        assert_eq!(
+            to_value(TruncationReason::MaxTimeExceeded).unwrap(),
+            json!("max_time_exceeded")
+        );
+        assert_eq!(
+            to_value(TruncationReason::Interrupted).unwrap(),
+            json!("interrupted")
+        );
+    }
+
+    #[test]
+    fn completeness_default_json_shape() {
+        assert_eq!(
+            to_value(Completeness::default()).unwrap(),
+            json!({
+                "complete": true,
+                "truncated_reason": null,
+                "ran_stages": [],
+                "skipped_stages": []
+            })
+        );
+    }
+
+    #[test]
+    fn stage_duration_json_shape() {
+        assert_eq!(
+            to_value(StageDuration {
+                stage: StageName::Dns,
+                ms: 12.5
+            })
+            .unwrap(),
+            json!({"stage": "dns", "ms": 12.5})
+        );
+    }
+
+    #[test]
+    fn dns_source_result_is_local_and_is_public() {
+        let sys = dns_result(DnsSource::System);
+        assert!(sys.is_local());
+        assert!(!sys.is_public());
+
+        let local = dns_result(DnsSource::Local(ip("192.168.1.1")));
+        assert!(local.is_local());
+        assert!(!local.is_public());
+
+        let public = dns_result(DnsSource::Public(ip("1.1.1.1")));
+        assert!(!public.is_local());
+        assert!(public.is_public());
+    }
+
+    #[test]
+    fn dns_source_result_is_ok_follows_outcome() {
+        assert!(dns_result(DnsSource::System).is_ok());
+        for outcome in [
+            DnsOutcome::NxDomain,
+            DnsOutcome::ServFail,
+            DnsOutcome::Timeout,
+            DnsOutcome::Error("x".into()),
+        ] {
+            let mut r = dns_result(DnsSource::System);
+            r.outcome = outcome;
+            assert!(!r.is_ok());
+        }
+    }
+
+    #[test]
+    fn tcp_probe_is_ok_depends_on_successes_only() {
+        assert!(!tcp_probe(0).is_ok());
+        assert!(tcp_probe(1).is_ok());
+        assert!(tcp_probe(3).is_ok());
+        // outcome が Ok でなくても successes > 0 なら is_ok (実装の挙動を固定)
+        let mut p = tcp_probe(1);
+        p.outcome = TcpOutcome::Timeout;
+        assert!(p.is_ok());
+    }
+}
