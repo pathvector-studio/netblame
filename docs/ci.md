@@ -47,6 +47,12 @@ The top level has two keys, `report` and `verdict`.
 | `.report.completeness.truncated_reason` | `null`, `"max_time_exceeded"` or `"interrupted"`. |
 | `.report.completeness.ran_stages`, `.skipped_stages` | Arrays of stage names (`env`, `dns`, `tcp`, `tls`, `http`, `quic`, `path`, `trace`). |
 | `.report.stage_durations` | Array of `{"stage": "...", "ms": 12.3}`, in execution order. |
+| `.report.dns.sources[].outcome` | Result of one DNS source: `Ok`, `NxDomain`, `ServFail`, `Timeout` or `Error`. |
+| `.report.tcp.probes[].outcome` | Result of one TCP probe: `Ok`, `Refused`, `Timeout` or `Error`. |
+| `.report.quic.outcome` | QUIC handshake result: `Ok`, `Timeout`, `HandshakeError` or `LocalError`. `.report.quic` is `null` when the QUIC stage did not run. |
+| `.report.trace.data.mtu_probes[].outcome` | Result of one DF-bit MTU probe (present only when `.report.trace.status` is `"Ran"`): `Silent`, `FragNeeded`, `Delivered` or `LocalError`. |
+
+The `outcome` values in the four rows above all share one shape: an object `{"code": "...", "detail": ...}`. `code` is the PascalCase variant name. A variant that carries no data has no `detail` key (e.g. `{"code": "Refused"}`). `Error`, `HandshakeError` and `LocalError` in `dns`, `tcp` and `quic` carry the message as a string (e.g. `{"code": "Error", "detail": "..."}`). In `quic`, `Ok` carries an object (`{"code": "Ok", "detail": {"handshake_ms": 12.5, "negotiated_alpn": "h3"}}`), and in `mtu_probes`, `FragNeeded` carries `{"mtu": 1400}` (`mtu` may be `null`). `LocalError` in `mtu_probes` has no `detail`. Note that `.report.trace` itself uses a different shape, `{"status": "Ran", "data": {...}}`; `status` can also be `Unsupported` (no `data` key) or `Failed` (`data` is a string). Do not match these `code` values against `culprit_code`: they are separate fields and `culprit_code` is snake_case.
 
 ```bash
 netblame --json --lang en --max-time 30 https://example.com > report.json || true   # exit 1/3 are results, not crashes (matters under `set -e`); note it also swallows exit 2 (usage/internal error)
