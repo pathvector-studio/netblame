@@ -119,7 +119,8 @@ async fn main() {
 
 /// Extracts the caller's IP for rate limiting: prefers the first hop of
 /// `X-Forwarded-For` (set by a reverse proxy) and falls back to the raw
-/// peer address from the TCP connection.
+/// peer address from the TCP connection. The header is trusted
+/// unconditionally, so the server must sit behind a proxy that overwrites it.
 fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     headers
         .get("x-forwarded-for")
@@ -179,7 +180,8 @@ async fn create_report(
 }
 
 /// Determines the public base URL used to build share links: `--public-url`
-/// if set, else `scheme://Host` from the request (defaulting to https).
+/// if set (trailing slashes stripped), else `http://{Host}` from the request
+/// (`http://localhost` if there is no usable Host header).
 fn public_base_url(state: &AppState, headers: &HeaderMap) -> String {
     if let Some(u) = &state.public_url {
         return u.trim_end_matches('/').to_string();
@@ -341,7 +343,7 @@ mod tests {
 
     #[test]
     fn client_ip_non_ascii_header_value_falls_back_to_peer() {
-        // HeaderValue は 0x80 以上のバイトを許すが、to_str は可視 ASCII のみ通すので peer へ
+        // HeaderValue は 0x80 以上のバイトを許すが、to_str は可視 ASCII とスペース・タブのみ通すので peer へ
         let mut h = HeaderMap::new();
         h.insert(
             "x-forwarded-for",
@@ -452,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn public_base_url_does_not_trim_host_header() {
+    fn public_base_url_embeds_host_header_as_is_without_trimming() {
         // Host 由来の値は末尾スラッシュ除去も検証もされず、そのまま埋め込まれる
         let s = state_with(None);
         let h = headers_with("host", "share.example.com/");

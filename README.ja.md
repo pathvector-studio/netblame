@@ -417,6 +417,12 @@ StateDirectory=netblame-share
 WantedBy=multi-user.target
 ```
 
+リバースプロキシ配下での運用:
+
+- `--rate-limit` に使うクライアント IP は、`X-Forwarded-For` ヘッダーの先頭の値 (カンマ区切りの最初の値、前後の空白は除去) が IP アドレスとして解釈できればそれを使います。このヘッダーは無条件に信頼されます。ヘッダーが無い、または先頭の値が IP として解釈できないときは TCP の接続元アドレスを使います (`src/bin/netblame_share.rs` の `client_ip`)。
+- そのため、クライアントが送ってきた `X-Forwarded-For` を捨てて上書きするリバースプロキシの配下で動かしてください。直接インターネットに公開すると、クライアントが `X-Forwarded-For` を偽装して `--rate-limit` を回避できます。
+- 共有リンクの base URL は、`--public-url` があればそれ (末尾の `/` は除去)、無ければ `http://{Host ヘッダー}` (Host ヘッダーも無ければ `http://localhost`) になります。TLS をリバースプロキシで終端する場合は `--public-url https://...` を指定してください。指定しないとリンクが `http://` になります。
+
 ## 今後の拡張
 
 [ROADMAP.md](ROADMAP.md) を参照。
