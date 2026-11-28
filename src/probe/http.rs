@@ -132,4 +132,85 @@ mod tests {
         assert!(!parses_h3(r#"h2=":443"; ma=2592000"#));
         assert!(!parses_h3(""));
     }
+
+    // ---- parses_h3: 現在の挙動を固定するテスト ----
+
+    #[test]
+    fn parses_h3_draft_versions() {
+        // `h3-` で始まるエントリはすべて h3 扱い (h3-29 / h3-27 など)
+        assert!(parses_h3(r#"h3-27=":443""#));
+        assert!(parses_h3(r#"h3-Q050=":443"; ma=86400"#));
+        // 実装は `h3-` の後ろを検証しない (現在の挙動)
+        assert!(parses_h3(r#"h3-=":443""#));
+        assert!(parses_h3(r#"h3-foo=":443""#));
+    }
+
+    #[test]
+    fn parses_h3_clear_is_false() {
+        // `clear` は広告の取り消しなので h3 ではない
+        assert!(!parses_h3("clear"));
+    }
+
+    #[test]
+    fn parses_h3_multiple_entries() {
+        // h3 が先頭・末尾・途中のいずれでも検出する
+        assert!(parses_h3(r#"h3=":443", h2=":443""#));
+        assert!(parses_h3(r#"h2=":443", h3=":443""#));
+        assert!(parses_h3(r#"h2=":443", h3=":443", h3-29=":443""#));
+        // h2 / quic だけなら false
+        assert!(!parses_h3(r#"h2=":443", h2=":8443""#));
+        assert!(!parses_h3(r#"quic=":443"; v="46,43", h2=":443""#));
+    }
+
+    #[test]
+    fn parses_h3_whitespace() {
+        // エントリ前後の空白 (タブ含む) は trim される
+        assert!(parses_h3(r#"   h3=":443""#));
+        assert!(parses_h3("\th3=\":443\"\t"));
+        assert!(parses_h3(r#"h2=":443" ,   h3=":443""#));
+        // カンマ直後の空白なしでも検出する
+        assert!(parses_h3(r#"h2=":443",h3=":443""#));
+        // `=` の前に空白があると検出しない (RFC 7230 のトークン文法上も不正)
+        assert!(!parses_h3(r#"h3 =":443""#));
+        // 空白だけ・カンマだけ
+        assert!(!parses_h3("   "));
+        assert!(!parses_h3(","));
+        assert!(!parses_h3(" , , "));
+    }
+
+    #[test]
+    fn parses_h3_is_case_sensitive() {
+        // ALPN プロトコル ID は大文字小文字を区別するので `H3` は認識しない
+        assert!(!parses_h3(r#"H3=":443""#));
+        assert!(!parses_h3(r#"H3-29=":443""#));
+        assert!(!parses_h3(r#"h2=":443", H3=":443""#));
+    }
+
+    #[test]
+    fn parses_h3_substring_is_not_match() {
+        // エントリ先頭が `h3=` / `h3-` でなければ部分文字列では一致しない
+        assert!(!parses_h3(r#"xh3=":443""#));
+        assert!(!parses_h3(r#"h2=":443"; ma=h3"#));
+        assert!(!parses_h3(r#"h2=":443"; persist=1; h3=":443""#));
+        assert!(!parses_h3("h3"));
+        assert!(!parses_h3("h30=\":443\""));
+        assert!(!parses_h3(r#"h2="h3.example.com:443""#));
+    }
+
+    #[test]
+    fn parses_h3_authority_not_validated() {
+        // authority が空でも `h3=` で始まれば true (ポートやホストは見ない)
+        assert!(parses_h3("h3="));
+        assert!(parses_h3(r#"h3="""#));
+        assert!(parses_h3(r#"h3="other.example.com:8443""#));
+    }
+
+    #[test]
+    fn parses_h3_comma_inside_quoted_string_current_behavior() {
+        // RFC 7838 では引用文字列内のカンマはエントリ区切りではないが、
+        // 実装は単純に `,` で分割するため、引用内の `h3=` を拾って true になる (バグっぽいが修正しない)
+        assert!(parses_h3(r#"h2="a, h3=b""#));
+        // 引用内でも `quic` の v="46,43" のような値は無害 (`43"` は h3 で始まらない)
+        assert!(!parses_h3(r#"quic=":443"; v="46,43""#));
+    }
 }
