@@ -419,6 +419,7 @@ WantedBy=multi-user.target
 
 リバースプロキシ配下での運用:
 
+- `--rate-limit 0` は無制限ではありません。何もアップロードできません。本文が 2 MiB 以下のアップロード (`POST /api/reports`) はすべて `429 Too Many Requests` (`rate limit exceeded`) で拒否されます。直近 1 分間にその IP で許可されたアップロード数が上限未満のときだけ許可する実装のためです (`src/share/server/ratelimit.rs` の `check`、`src/bin/netblame_share.rs` の `create_report`)。それを超える本文は、`DefaultBodyLimit` を設定していないため axum の既定の本文サイズ上限 (2 MiB) により、レート制限の判定より前に `413` になります。起動時に値が弾かれることはありません。レート制限の対象はアップロードだけで、`GET /api/reports/{id}` と `GET /r/{id}` には影響しません。制限を無効にする手段は無いので、代わりに大きな値を指定してください。
 - `--rate-limit` に使うクライアント IP は、`X-Forwarded-For` ヘッダーの先頭の値 (カンマ区切りの最初の値、前後の空白は除去) が IP アドレスとして解釈できればそれを使います。このヘッダーは無条件に信頼されます。ヘッダーが無い、または先頭の値が IP として解釈できないときは TCP の接続元アドレスを使います (`src/bin/netblame_share.rs` の `client_ip`)。
 - そのため、クライアントが送ってきた `X-Forwarded-For` を捨てて上書きするリバースプロキシの配下で動かしてください。直接インターネットに公開すると、クライアントが `X-Forwarded-For` を偽装して `--rate-limit` を回避したり、先頭の値に他人の IP を入れてその IP の枠を食い潰したりできます。
 - プロキシが `X-Forwarded-For` を付けない場合は、クライアントが送ってきたヘッダーを取り除くかどうかで挙動が変わります。
