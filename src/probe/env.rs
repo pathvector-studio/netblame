@@ -36,11 +36,12 @@ pub fn find_hosts_override(content: &str, host: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         let mut parts = line.split_whitespace();
-        let ip = parts.next()?.to_string();
+        // 空行・コメント行・空白だけの行はその行だけ読み飛ばす (探索は打ち切らない)
+        let Some(ip) = parts.next() else { continue };
         // parts の先頭が消費済みなのでこのまま名前部分を走査
         for name in parts {
             if name.to_ascii_lowercase() == host_lower {
-                return Some(ip);
+                return Some(ip.to_string());
             }
         }
     }
@@ -413,30 +414,44 @@ mod tests {
         assert_eq!(find_hosts_override("10.0.0.5 foo.example\n", ""), None);
     }
 
-    // 注意: 現在の実装は `parts.next()?` のため、空行・コメント行・空白だけの行に
-    // 当たった時点で関数全体が None を返し、それ以降の行を見ない (バグの疑い)。
-    // 修正する場合はこれらのテストの期待値を Some(..) に変えること。
+    // 空行・コメント行・空白だけの行は読み飛ばし、後続のエントリも探索する。
     #[test]
-    fn hosts_blank_line_stops_search_current_behavior() {
+    fn hosts_blank_line_does_not_stop_search() {
         let content = "127.0.0.1 localhost\n\n10.0.0.5 foo.example\n";
-        assert_eq!(find_hosts_override(content, "foo.example"), None);
+        assert_eq!(
+            find_hosts_override(content, "foo.example"),
+            Some("10.0.0.5".to_string())
+        );
     }
 
     #[test]
-    fn hosts_comment_line_stops_search_current_behavior() {
+    fn hosts_comment_line_does_not_stop_search() {
         let content = "# managed by tool\n10.0.0.5 foo.example\n";
-        assert_eq!(find_hosts_override(content, "foo.example"), None);
-        let content = "127.0.0.1 localhost\n   \t \n10.0.0.5 foo.example\n";
-        assert_eq!(find_hosts_override(content, "foo.example"), None);
+        assert_eq!(
+            find_hosts_override(content, "foo.example"),
+            Some("10.0.0.5".to_string())
+        );
     }
 
     #[test]
-    fn hosts_match_before_blank_line_is_still_found() {
+    fn hosts_whitespace_only_line_does_not_stop_search() {
+        let content = "127.0.0.1 localhost\n   \t \n10.0.0.5 foo.example\n";
+        assert_eq!(
+            find_hosts_override(content, "foo.example"),
+            Some("10.0.0.5".to_string())
+        );
+    }
+
+    #[test]
+    fn hosts_entries_before_and_after_blank_line_are_found() {
         let content = "10.0.0.5 foo.example\n\n10.0.0.6 bar.example\n";
         assert_eq!(
             find_hosts_override(content, "foo.example"),
             Some("10.0.0.5".to_string())
         );
-        assert_eq!(find_hosts_override(content, "bar.example"), None);
+        assert_eq!(
+            find_hosts_override(content, "bar.example"),
+            Some("10.0.0.6".to_string())
+        );
     }
 }
