@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(ns, expected);
     }
 
-    // ---- find_hosts_override: 現在の挙動を固定するテスト ----
+    // ---- find_hosts_override のテスト ----
 
     #[test]
     fn hosts_empty_input() {
