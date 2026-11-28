@@ -253,6 +253,8 @@ netblame-share [flags]
 --public-url <url>         Public base URL used to build share links (default: derived from the request's Host header)
 ```
 
+The effective upload size limit is the smaller of `--max-body-kb` and 2 MiB (2,097,152 bytes). `create_report` in `src/bin/netblame_share.rs` takes the body as `axum::body::Bytes` and no `DefaultBodyLimit` is set, so axum's default body limit of 2 MiB applies before `--max-body-kb` is checked. A body larger than `--max-body-kb` (and 2 MiB or less) is rejected with `413 Payload Too Large` (`report body too large`). A body larger than 2 MiB is rejected with `413` (`Failed to buffer the request body: length limit exceeded`) even if `--max-body-kb` is set above 2048; raising `--max-body-kb` beyond 2048 has no effect.
+
 Endpoints: `POST /api/reports` (upload, returns `{"id", "url"}`), `GET /r/{id}` (server-rendered HTML report page, no JS), `GET /api/reports/{id}` (raw JSON).
 
 Point your own `netblame` runs at it with `--share-url http://your-host:8788` or `export NETBLAME_SHARE_URL=http://your-host:8788`.
