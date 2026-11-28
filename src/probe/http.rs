@@ -137,8 +137,10 @@ mod tests {
 
     #[test]
     fn parses_h3_draft_versions() {
-        // `h3-` で始まるエントリはすべて h3 扱い (h3-29 / h3-27 など)
+        // `h3-` で始まるエントリはすべて h3 扱い (IETF ドラフト版の h3-29 / h3-27 など)
         assert!(parses_h3(r#"h3-27=":443""#));
+        // h3-Q050 は IETF ドラフトではなく gQUIC (Google QUIC) Q050 の識別子。
+        // `h3-` 前方一致なので gQUIC の広告も h3 と判定する (現在の挙動)
         assert!(parses_h3(r#"h3-Q050=":443"; ma=86400"#));
         // 実装は `h3-` の後ろを検証しない (現在の挙動)
         assert!(parses_h3(r#"h3-=":443""#));
@@ -170,7 +172,8 @@ mod tests {
         assert!(parses_h3(r#"h2=":443" ,   h3=":443""#));
         // カンマ直後の空白なしでも検出する
         assert!(parses_h3(r#"h2=":443",h3=":443""#));
-        // `=` の前に空白があると検出しない (RFC 7230 のトークン文法上も不正)
+        // `=` の前に空白があると検出しない (RFC 7838 Section 3 の ABNF
+        // `alternative = protocol-id "=" alt-authority` は `=` の前に空白を許さない)
         assert!(!parses_h3(r#"h3 =":443""#));
         // 空白だけ・カンマだけ
         assert!(!parses_h3("   "));
