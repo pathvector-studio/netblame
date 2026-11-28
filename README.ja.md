@@ -396,6 +396,8 @@ netblame-share [flags]
 --public-url <url>         共有リンク生成に使う公開 base URL (既定: リクエストの Host ヘッダから導出)
 ```
 
+実際のアップロード上限は `--max-body-kb` と 2 MiB (2,097,152 バイト) の小さいほうです。`src/bin/netblame_share.rs` の `create_report` は本文を `axum::body::Bytes` で受け取り、`DefaultBodyLimit` を設定していないため、`--max-body-kb` の判定より先に axum の既定の本文サイズ上限 (2 MiB) が効きます。本文が `--max-body-kb` を超える (かつ 2 MiB 以下) 場合は `413 Payload Too Large` (`report body too large`) で拒否されます。本文が 2 MiB を超える場合は、`--max-body-kb` を 2048 より大きくしていても `413` (`Failed to buffer the request body: length limit exceeded`) で拒否されます。`--max-body-kb` を 2048 より大きくしても効果はありません。
+
 エンドポイント: `POST /api/reports` (アップロード、`{"id", "url"}` を返す)、`GET /r/{id}` (サーバサイドレンダリングされた HTML レポートページ、JS 不使用)、`GET /api/reports/{id}` (生 JSON)。
 
 自分の `netblame` 実行をこのサーバに向けるには `--share-url http://your-host:8788` または `export NETBLAME_SHARE_URL=http://your-host:8788` を使ってください。
